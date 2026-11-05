@@ -26,7 +26,7 @@ Use one Twitch-specific ad blocker at a time. Remove older TwitchAdSolutions ins
 ### Violentmonkey
 
 1. Install [Violentmonkey](https://violentmonkey.github.io/).
-2. Open [vaft.user.js](https://raw.githubusercontent.com/xBandaku/TwitchAdSolutions/master/vaft/vaft.user.js) and confirm installation. If your browser downloads the file, import it through Violentmonkey's dashboard.
+2. Open [vaft.user.js](https://raw.githubusercontent.com/rrro0orrr/TwitchAdSolutions/master/vaft/vaft.user.js) and confirm installation. If your browser downloads the file, import it through Violentmonkey's dashboard.
 3. Reload Twitch.
 
 [Tampermonkey](https://www.tampermonkey.net/) and [Userscripts for Safari](https://apps.apple.com/us/app/userscripts/id1463298887) also work. Greasemonkey is incompatible. See [troubleshooting](issues.md) for userscript permissions.
@@ -43,7 +43,7 @@ Use one Twitch-specific ad blocker at a time. Remove older TwitchAdSolutions ins
 3. Set this value and apply your changes:
 
    ```text
-   userResourcesLocation https://raw.githubusercontent.com/xBandaku/TwitchAdSolutions/master/vaft/vaft-ublock-origin.js
+   userResourcesLocation https://raw.githubusercontent.com/rrro0orrr/TwitchAdSolutions/master/vaft/vaft-ublock-origin.js
    ```
 
    If you already use custom resources, append the URL with a space between entries. See uBlock Origin's [advanced settings](https://github.com/gorhill/uBlock/wiki/Advanced-settings#userresourceslocation).
@@ -58,8 +58,8 @@ To uninstall, remove the filter and this resource URL. Set `userResourcesLocatio
 
 | Script | Userscript | uBlock Origin |
 | --- | --- | --- |
-| vaft (recommended) | [Install](https://raw.githubusercontent.com/xBandaku/TwitchAdSolutions/master/vaft/vaft.user.js) | [Resource](https://raw.githubusercontent.com/xBandaku/TwitchAdSolutions/master/vaft/vaft-ublock-origin.js) |
-| video-swap-new | [Install](https://raw.githubusercontent.com/xBandaku/TwitchAdSolutions/master/video-swap-new/video-swap-new.user.js) | [Resource](https://raw.githubusercontent.com/xBandaku/TwitchAdSolutions/master/video-swap-new/video-swap-new-ublock-origin.js) |
+| vaft (recommended) | [Install](https://raw.githubusercontent.com/rrro0orrr/TwitchAdSolutions/master/vaft/vaft.user.js) | [Resource](https://raw.githubusercontent.com/rrro0orrr/TwitchAdSolutions/master/vaft/vaft-ublock-origin.js) |
+| video-swap-new | [Install](https://raw.githubusercontent.com/rrro0orrr/TwitchAdSolutions/master/video-swap-new/video-swap-new.user.js) | [Resource](https://raw.githubusercontent.com/rrro0orrr/TwitchAdSolutions/master/video-swap-new/video-swap-new-ublock-origin.js) |
 
 ## Configuration
 

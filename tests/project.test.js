@@ -299,10 +299,10 @@ for (const script of scripts) {
             const url = new URL(metadata.get(key));
             assert.equal(url.protocol, 'https:');
             assert.ok(['github.com', 'raw.githubusercontent.com'].includes(url.hostname));
-            assert.ok(url.pathname.startsWith('/xBandaku/TwitchAdSolutions/'));
+            assert.ok(url.pathname.startsWith('/rrro0orrr/TwitchAdSolutions/'));
             assert.ok(
-                url.pathname.startsWith('/xBandaku/TwitchAdSolutions/raw/master/')
-                    || url.pathname.startsWith('/xBandaku/TwitchAdSolutions/master/'),
+                url.pathname.startsWith('/rrro0orrr/TwitchAdSolutions/raw/master/')
+                    || url.pathname.startsWith('/rrro0orrr/TwitchAdSolutions/master/'),
                 key + ' must track the master branch'
             );
             const expectedPath = script.file === 'vaft/vaft-violentmonkey.user.js'
