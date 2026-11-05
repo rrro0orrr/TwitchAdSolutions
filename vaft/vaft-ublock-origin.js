@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 124;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 125;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'uBlock Origin';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -1809,6 +1809,19 @@ twitch-videoad.js text/javascript
             const sequence = sequenceMatch ? Number(sequenceMatch[1]) : null;
             const signature = textStr.split(/\r?\n/).filter(line => line && !line.startsWith('#')).join('\n');
             const hadCleanPlaylist = streamInfo.LastCleanSignature !== null;
+            // Twitch can renumber a native playlist mid-break (e.g. after the session moves to
+            // another origin or a fresh-token reload): same URL, LOWER media sequence. A strict
+            // "sequence > last" test then never passes again until the new numbers overtake the
+            // old ones, so CleanPlaylistCount and HasAdvancedCleanPlaylist stay stuck, the break
+            // never ends, and the post-ad reset never runs — the stream stays frozen on the
+            // backup/strip path. Restart the baseline instead. Mirrors GosuDRM/TTV-AB 25.0.1 (#96).
+            if (sequence !== null && streamInfo.LastCleanSequence !== null && sequence < streamInfo.LastCleanSequence) {
+                console.log('[AD DEBUG] Native playlist renumbered during ad-end check (' + streamInfo.LastCleanSequence + ' -> ' + sequence + ') — restarting clean-playlist baseline');
+                streamInfo.LastCleanSequence = sequence;
+                streamInfo.LastCleanSignature = signature;
+                streamInfo.LastCandidateCleanAt = Date.now();
+                streamInfo.CleanPlaylistCount = 1;
+            }
             const advanced = sequence !== null && streamInfo.LastCleanSequence !== null
                 ? sequence > streamInfo.LastCleanSequence
                 : signature !== streamInfo.LastCleanSignature;
@@ -2632,6 +2645,9 @@ twitch-videoad.js text/javascript
     }
     // Hide Twitch's ad break / Turbo promo / stream display ad overlays when we're already blocking ads
     function hideTwitchAdOverlays() {
+        // Separate video ads live beside the player and in chat, so they are checked even
+        // when the player root has not been cached yet.
+        suppressSeparateVideoAds();
         if (!cachedPlayerRootDiv || !cachedPlayerRootDiv.isConnected) return;
         // Hide stream display ad (SDA) wrapper
         const sdaElements = document.querySelectorAll('[data-test-selector="sda-wrapper"]');
@@ -2645,50 +2661,93 @@ twitch-videoad.js text/javascript
                 }
             }
         }
-        // Separate video-ad guard (mirrors GosuDRM/TTV-AB v12.0.1-12.0.8 — issue #249): since
-        // July 2026 Twitch renders standalone <video> ad elements beside the player and in chat
-        // — a second "player" with a Play-ad button. They are delivered outside the m3u8, so
-        // neither segment stripping nor backup-swapping touches them.
-        // Matched ONLY on the Amazon ad-CDN host. That is the safety property: the live stream is
-        // fed by MediaSource and always carries a blob: URL, so the primary player can never match
-        // this test. The player-owned element is skipped as a second, independent guard.
-        // Muted + paused as well as hidden — a display:none <video> still plays audio (TTV-AB v12.0.7).
+    }
+    // Separate video-ad guard (mirrors GosuDRM/TTV-AB v12.0.1-12.0.8 — issue #249): since
+    // July 2026 Twitch renders standalone <video> ad elements beside the player and in chat
+    // — a second "player" with a Play-ad button. They are delivered outside the m3u8, so
+    // neither segment stripping nor backup-swapping touches them.
+    // Primary match is the Amazon ad-CDN host (on the element or a <source> child). Twitch has
+    // since also served these ads from other hosts, identified only by an accessibility label
+    // (TTV-AB v24.0.0, GosuDRM/TTV-AB#93). The label match is the weaker signal, so it only
+    // applies when the live player is known and is a different element, and never to a blob:
+    // (MediaSource) element — the live stream always plays from one.
+    // Muted + paused as well as hidden — a display:none <video> still plays audio (TTV-AB v12.0.7).
+    function getSeparateVideoAdHost(vid) {
+        const sources = [vid.currentSrc, vid.getAttribute('src')];
+        const sourceChildren = vid.querySelectorAll('source[src]');
+        for (let i = 0; i < sourceChildren.length; i++) {
+            sources.push(sourceChildren[i].getAttribute('src'));
+        }
+        for (let i = 0; i < sources.length; i++) {
+            const src = sources[i];
+            if (!src || src.startsWith('blob:')) continue;
+            try {
+                const host = new URL(src, document.location.href).hostname.toLowerCase();
+                if (host === 'media-amazon.com' || host.endsWith('.media-amazon.com')) return host;
+            } catch {}
+        }
+        return '';
+    }
+    function hasSeparateVideoAdLabel(vid) {
+        const labelId = vid.getAttribute('aria-labelledby');
+        if (labelId && vid.parentElement) {
+            const siblings = vid.parentElement.children;
+            for (let i = 0; i < siblings.length; i++) {
+                if (siblings[i] !== vid && siblings[i].id === labelId && siblings[i].hidden) return true;
+            }
+        }
+        const label = (vid.getAttribute('aria-label') || '').trim().toLowerCase();
+        return label === 'video advertisement' || label.startsWith('this advertisement');
+    }
+    function getSeparateVideoAdReason(vid, primaryVideo) {
+        if (!vid || vid === primaryVideo) return '';
+        const host = getSeparateVideoAdHost(vid);
+        if (host) return host;
+        const src = vid.currentSrc || vid.getAttribute('src') || '';
+        if (src.startsWith('blob:') || !hasSeparateVideoAdLabel(vid)) return '';
+        // Without a known live player, keep suppressing an element already marked as an ad,
+        // but do not mark a new one on the label alone.
+        if (!primaryVideo) return vid.dataset.tasAdHidden ? 'ad label' : '';
+        return 'ad label';
+    }
+    function suppressSeparateVideoAd(vid, primaryVideo) {
+        const reason = getSeparateVideoAdReason(vid, primaryVideo);
+        if (reason) {
+            // Re-assert every tick rather than marking once: a React re-render can drop the
+            // inline style while keeping the element, and a one-shot marker would never re-hide it.
+            vid.style.setProperty('display', 'none', 'important');
+            try { vid.muted = true; if (!vid.paused) vid.pause(); } catch {}
+            if (!vid.dataset.tasAdHidden) {
+                // '1', not '': dataset returns the empty string as-is, which is falsy —
+                // the dedup, the restore branch and getPlayerVideoElement() would all misread it.
+                vid.dataset.tasAdHidden = '1';
+                console.log('[AD DEBUG] Hidden separate Twitch video ad (' + reason + ') — issue #249');
+            }
+        } else if (vid.dataset.tasAdHidden) {
+            // Twitch RECYCLES <video> nodes: an element that held an ad can later be handed real
+            // content. Without this it would stay display:none + muted forever — invisible content.
+            // An element promoted to primary is restored too. Mirrors TTV-AB v12.0.2
+            // ("safely restores videos that Twitch reuses").
+            delete vid.dataset.tasAdHidden;
+            vid.style.removeProperty('display');
+            try { vid.muted = false; } catch {}
+            console.log('[AD DEBUG] Restored recycled <video> — source is no longer an ad (#249)');
+        }
+    }
+    function suppressSeparateVideoAds() {
         const primaryVideo = playerForMonitoringBuffering?.player?.getHTMLVideoElement?.();
         const allVideos = document.getElementsByTagName('video');
         for (let i = 0; i < allVideos.length; i++) {
-            const vid = allVideos[i];
-            let adHost = '';
-            try {
-                const vidSrc = vid.currentSrc || vid.getAttribute('src') || '';
-                if (vidSrc && !vidSrc.startsWith('blob:')) {
-                    const host = new URL(vidSrc, document.location.href).hostname.toLowerCase();
-                    if (host === 'media-amazon.com' || host.endsWith('.media-amazon.com')) {
-                        adHost = host;
-                    }
-                }
-            } catch {}
-            if (adHost && vid !== primaryVideo) {
-                // Re-assert every tick rather than marking once: a React re-render can drop the
-                // inline style while keeping the element, and a one-shot marker would never re-hide it.
-                vid.style.setProperty('display', 'none', 'important');
-                try { vid.muted = true; if (!vid.paused) vid.pause(); } catch {}
-                if (!vid.dataset.tasAdHidden) {
-                    // '1', not '': dataset returns the empty string as-is, which is falsy —
-                    // the dedup, the restore branch and getPlayerVideoElement() would all misread it.
-                    vid.dataset.tasAdHidden = '1';
-                    console.log('[AD DEBUG] Hidden separate Twitch video ad (' + adHost + ') — issue #249');
-                }
-            } else if (vid.dataset.tasAdHidden && !adHost) {
-                // Twitch RECYCLES <video> nodes: an element that held an ad can later be handed real
-                // content. Without this it would stay display:none + muted forever — invisible content.
-                // Deliberately not gated on the primary check, so an element promoted to primary is
-                // still restored. Mirrors TTV-AB v12.0.2 ("safely restores videos that Twitch reuses").
-                delete vid.dataset.tasAdHidden;
-                vid.style.removeProperty('display');
-                try { vid.muted = false; } catch {}
-                console.log('[AD DEBUG] Restored recycled <video> — source is no longer an ad (#249)');
-            }
+            suppressSeparateVideoAd(allVideos[i], primaryVideo);
         }
+    }
+    // The monitor tick runs every 1-3s, so an ad video could play audibly until the next tick.
+    // Media events do not bubble, but a capture-phase listener on document still sees them,
+    // which lets the guard act the moment a separate ad starts loading or playing.
+    function onMediaEventForSeparateVideoAds(e) {
+        const vid = e.target;
+        if (!(vid instanceof HTMLVideoElement)) return;
+        try { suppressSeparateVideoAd(vid, playerForMonitoringBuffering?.player?.getHTMLVideoElement?.()); } catch {}
     }
     function updateAdblockBanner(data) {
         if (typeof window !== 'undefined' && window.__tasDiagnostics) {
@@ -3759,7 +3818,7 @@ twitch-videoad.js text/javascript
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.39');
+        initializeTASControls('vaft', '68.5.40');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
@@ -3897,6 +3956,8 @@ twitch-videoad.js text/javascript
     console.log('[AD DEBUG] Config: ReloadPlayerAfterAd = ' + ReloadPlayerAfterAd + ', ForceAccessTokenPlayerType = ' + ForceAccessTokenPlayerType + ', PinBackupPlayerType = ' + PinBackupPlayerType);
     hookWindowWorker();
     hookFetch();
+    document.addEventListener('loadstart', onMediaEventForSeparateVideoAds, true);
+    document.addEventListener('play', onMediaEventForSeparateVideoAds, true);
     const realXHROpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = maskAsNative(function(method, url) {
         if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
