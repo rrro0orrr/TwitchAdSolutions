@@ -1,5 +1,300 @@
 ## Unreleased
 
+- Add a playback timeline in settings showing the newest 20 sanitized local events, distinguishing recovery requests from observed recovery outcomes.
+- Add a ready-to-paste bug report formatted with the repository's GitHub issue-template headings, including the script/version, current playback snapshot and recent allowlisted event details. Unknown browser, extension, console and troubleshooting information is marked for the user to fill in; the report is not sent automatically.
+- Add versioned settings backup export/import for vaft and video-swap-new. Imports are limited to the matching script, validate known settings before writing, roll back on storage errors, and reject files larger than 64 KiB. Invalid saved values prevent creation of an unusable backup.
+- Synthetic browser fixtures cover the timeline, issue-template-formatted report, settings round-trip and invalid-import atomicity. No new live Twitch playback evidence is claimed.
+- End an ad break when Twitch renumbers the native playlist mid-break. The ad-end check required each clean playlist's media sequence to exceed the last one; a renumbered playlist (same URL, lower sequence) never passed again until the new numbers overtook the old ones, so the break never ended, the post-ad reset never ran and the stream could stay frozen. A lower sequence now restarts the clean-playlist baseline; a renumbered playlist that does not advance still cannot end the break. Mirrors GosuDRM/TTV-AB 25.0.1 ([GosuDRM/TTV-AB#96](https://github.com/GosuDRM/TTV-AB/issues/96)).
+- Hide and mute separate side/chat video ads that are not served from the Amazon ad CDN. In addition to the `media-amazon.com` host (now also checked on `<source>` children), match a "video advertisement" / "this advertisement..." accessibility label or an `aria-labelledby` pointing at a hidden sibling. The label match only applies when the live player is known and is a different element, and never to a `blob:` (MediaSource) element. Mirrors GosuDRM/TTV-AB 24.0.0 ([GosuDRM/TTV-AB#93](https://github.com/GosuDRM/TTV-AB/issues/93)).
+- Check a video the moment it starts loading or playing (capture-phase `loadstart`/`play` listeners), instead of waiting up to 3 seconds for the next monitor tick, and run the side/chat ad check even before the player root is cached.
+- Evidence classification: synthetic edge case / preventive hardening for vaft. The renumbering and label-only ads were reported live against TTV-AB; no vaft capture or live reproduction is included. A user report of ads still appearing and streams freezing without resuming motivated the review.
+- Validation: a synthetic ad-end regression (playlist renumbered 100 -> 5 -> 6 -> 7) stays at 1 clean poll before the fix and reaches 3 after it; a renumbered playlist that does not advance stays at 1. Browser checks in Chromium cover host, `<source>` child, label and hidden-label matches, the live player and ordinary videos left alone, and restoring a recycled element.
+- Versions: vaft 68.5.40 (internal 125), video-swap-new 1.94 (internal 62).
+
+## v68.5.37 (2026-11-01)
+
+- Preserve a recent trusted playback-control input when clearing older pause intent. A subsequent native pause can still be attributed to the user instead of being inferred as a Twitch/player pause.
+- Match trusted input to a pause by its short 1.5-second age window rather than video-element identity, so a Twitch video replacement between the user action and pause event does not discard the intent.
+- Apply both fixes consistently to the vaft userscript and uBlock Origin resource. The input cue is consumed by the pause event and still expires through the existing time limit.
+- Evidence classification: synthetic edge case. The event sequences were reproduced with synthetic player fixtures; no live Twitch reproduction is claimed.
+- Validation: the two new regression cases fail against the pre-fix `e42f2b8` source in both vaft formats and pass after the change. See PR validation for the exact commands and complete test results.
+- Version: vaft 68.5.37 (internal 122). Other script versions are unchanged.
+
+## v68.5.36 (2026-10-17)
+
+- Fix vaft pause-intent detection so an internal video pause does not permanently block recovery when Twitch's logical player and core still report playing. Reconcile inferred intent after a 350ms settling window and on subsequent monitor ticks. Preserve pauses associated with trusted playback-control input or logical paused state; ignore pause/play events from replaced videos.
+- Track only the timing and video identity of playback-control pointer/keyboard input, without recording typed text. Ignore typing, modified/repeated shortcuts, non-primary pointer input and the settings dialog. Clear consumed input cues when playback resumes.
+- Add sanitized pause-intent and pause-intent-cleared diagnostics to distinguish inferred/control-linked intent and explain why it cleared. Events remain capped at 100 and omit channel names, URLs, tokens and headers.
+- Confirmed live evidence: a user-supplied Firefox console trace records Twitch's worker RPC pausing at 1076.861818 seconds; the matching export has the identical position, native paused=true, player/core paused=false, userPauseIntent=true and a blocked-user-pause recovery request after the ad ended. This identifies the recovery block; it does not establish why Twitch initiated the pause. Raw user logs are not included in the repository. Fix verification uses synthetic event/player fixtures and native-media browser tests; live behavior after this patch still needs confirmation.
+- Validation: six targeted regressions fail at 806c09f for the expected pause-intent errors and pass after the fix. Local Windows lint, Node suites, packaging and four Python checks pass; browser fixtures pass 258 tests with 30 documented Windows WebKit media skips. Native-media fixtures verify that an internal pause permits recovery and a trusted pause control remains protected despite stale logical flags.
+- Version: vaft 68.5.36 (internal 121). Other script versions are unchanged.
+
+## v68.5.35 (2026-10-17)
+
+- Add an optional vaft full-page refresh fallback under Advanced recovery settings, disabled by default. After both player recovery attempts time out, require another 3 seconds without progress on the same video and route before refreshing.
+- Limit automatic page refreshes to once every 5 minutes per tab using a cooldown that survives document reloads. If tab storage is unavailable or its timestamp is invalid, do not refresh. Cancel for playback progress, user or player pause, seeking, ended video, navigation, video replacement, non-live content, Picture-in-Picture, a new recovery, or a disabled option.
+- Warn in settings that a full refresh may trigger another ad and interrupt chat. Record a bounded, sanitized page-refresh diagnostic event before navigation. Successful, cancelled, unavailable and exceptional recovery outcomes do not trigger this fallback.
+- Synthetic edge cases: verify both failures and the extra observation window, opt-in/reset behavior, cooldown persistence and expiry, and cancellation safeguards. Browser fixtures verify actual document navigation after exhausted recovery. No claim that a full refresh prevents another live Twitch freeze or ad.
+- Validation: two before/after regressions fail at ba8d34c for the expected reason and pass after the change. Local Windows lint, Node suites, seven-script packaging and four Python tests pass. Browser fixtures: 250 passed, 26 documented Windows WebKit media skips. Connected Chrome confirms the option is off by default and persists after saving on a local UI fixture.
+- Version: vaft 68.5.35 (internal 120). Other script versions are unchanged.
+
+## v68.5.34 (2026-10-17)
+
+- Start vaft's ad and post-ad freeze recovery after 3 seconds without playhead progress when readiness is low and no more than 0.1 seconds is buffered at the current position. Keep the 8-second threshold for usable buffered media, existing switch/reload grace periods, pause and seek safeguards, and bounded retries. This reduces detection time; token fetch and player startup still add recovery time.
+- Add saved settings-button positions in all four corners and a hide option to vaft and video-swap-new. Apply presentation changes immediately. Alt+Shift+A reopens settings when hidden; reset restores the visible bottom-right button. Ignore the shortcut while typing or composing text.
+- Synthetic edge cases: verify empty buffers, buffer exhaustion and gaps request recovery sooner, while usable buffered media retains its observation window. Verify settings persistence, hiding, keyboard reopening, reset and focus in Chromium, Firefox and WebKit. Faster timing is not yet measured in a live Twitch freeze.
+- Validation: six targeted timing regressions fail at 103a11e for the expected reason and pass after the change. The four new UI tests fail against the old scripts because the position control is absent. Local Windows checks pass: lint, Node suites, seven-script packaging, four Python tests, and 240 browser fixtures (24 documented WebKit media skips). Manually verify corner positioning, hiding and shortcut reopening in connected Chrome on a local UI fixture.
+- Versions: vaft 68.5.34 (internal 119), video-swap-new 1.92 (internal 60). Other script versions are unchanged.
+
+## v68.5.33 (2026-10-17)
+
+- Allow required early resets when stale paused internals disagree with a wrapper that reports playing. Explicit user pause and wrapper-confirmed pause still block recovery, and paused picture-in-picture playback remains protected.
+- Let the bounded ad/post-ad watchdog recover a paused native video when the player wrapper reports playing and there is no user pause intent. Keep the two-attempt recovery deadline when play cannot resume, instead of cancelling on stale paused internals.
+- Add allowlisted recovery-blocked reasons and the core pause signal to diagnostic exports, distinguishing a blocked request from an actual reset or timeout.
+- Evidence: a user export from v68.5.32 shows native paused=true, wrapper paused=false, userPauseIntent=false, an early reset request, no reload-start event and no last-reload timestamp. The internal core pause flag was not captured. Synthetic tests reproduce the matching pause-gate and watchdog failures; live recovery after this patch still needs confirmation.
+- Six targeted regressions fail against dea40e3 for the expected reasons and pass after the fixes in both vaft formats. Add browser coverage for the paused-video/playing-wrapper mismatch, and retain pause-intent, PiP, navigation and bounded-retry checks.
+- Version: vaft 68.5.33 (internal 118). Other script versions are unchanged.
+
+## v68.5.32 (2026-10-17)
+
+- Preventive hardening for a full post-ad freeze: keep watching an already-playing video for 45 seconds after an ad ends. A depleted, non-advancing playhead can request bounded recovery after switch/reload grace periods, even with no current media data. Preserve observed playback, the watch deadline and its recovery budget across same-channel video replacements. Reset on navigation, respect pause intent and seeking, and do not treat initial loading as a stall.
+- Add actual reload-start and recovery-finished events to vaft diagnostics. Schema v2 includes a safe playback snapshot with video readiness, network state, buffer ranges, pause intent, media error code and recovery status. Exclude URLs, channel names, tokens, headers and error text. Deduplicate unchanged backup selections and clear previous outcomes when a new reload is requested.
+- A user-reported full audio/video freeze followed an autoplay backup and early reload request in v68.5.31. The old export did not record playback state or recovery outcomes, so it cannot establish that report's root cause. The related recovery gap is reproduced with synthetic inputs; no live playback fix is claimed.
+- Verify the synthetic regression fails against 34bc5e1 and passes in both vaft formats after the fix. Add browser fixtures for post-ad depletion and recovery outcome reporting.
+- Version: vaft 68.5.32 (internal 117). Other script versions are unchanged.
+
+## v68.5.31 (2026-10-17)
+
+- Preventive hardening for eight synthetic edge cases: query-bearing media URLs, redirected master URL resolution, interrupted playlist-body reads, picture-by-picture GraphQL batches, omitted strip fetch options, drift correction across player replacement, unrelated-host header capture, and binary Brave retry bodies.
+- Preserve other batched operations when normalizing token player types. Restrict Twitch header capture to the HTTPS GQL endpoint. Restore the original video's playback speed when catch-up ends or the player changes.
+- Add a settings dialog to vaft and video-swap-new with input validation and reset controls, an optional backup/quality/recovery status display, and a local diagnostic export capped at 100 events. Exports omit channel names, URLs, tokens and headers.
+- Replay existing unmodified sanitized v1/v2 captures through strip and both video-swap-new formats in addition to vaft. Keep missing enhanced-codec and redirected-master trigger coverage explicit. Update bug-report links to this fork.
+- Add regressions with verified failures against de54206 and passing results after the fixes. These tests do not establish current Twitch playback impact; no new live ad-break reproduction is claimed.
+- Versions: vaft 68.5.31 (internal 116), video-swap-new 1.91 (internal 59), strip 1.12 (internal 29), Brave helper 1.3.5 (internal 9).
+- Local validation on Windows with Node 24: lint, Node suites, packaging and four Python tests passed. Browser fixtures passed 220 tests, with 20 documented Windows WebKit PCM-media skips. All 21 targeted regressions failed at de54206 for the expected reasons and passed after the fixes.
+
+## v68.5.30 (2026-10-16)
+
+- Preventive hardening: skip AVC rewriting for HEVC and AV1 variants without resolution metadata. Preserve those entries so a missing optional field cannot reject the master-playlist fetch. Reproduced with synthetic inputs; current Twitch playback impact is unconfirmed.
+- Add synthetic resilience coverage for mixed AVC and enhanced-codec playlists in both vaft install formats.
+- Add sanitized live Twitch v1/v2 master and media captures with provenance, response hashes, and replay checks in Node and browser workers. Report when the relevant code paths were not exercised.
+- Separate captured-response evidence from synthetic resilience tests. Add capture and before/after regression commands, evidence requirements for findings and PRs, and clearer README instructions.
+- Versions: vaft 68.5.30 (internal 115).
+
+### Validation
+
+- Passed source and workflow lint, Node checks on Node 22/24 and Windows/Linux, and packaging verification for all seven scripts.
+- Passed Chromium, Firefox, and WebKit fixtures in Linux CI. Local Windows validation passed 187 browser tests with 20 WebKit PCM media cases skipped.
+- Verified that the synthetic missing-resolution regression fails before the fix with the expected error and passes afterward in both vaft formats. Current captures do not exercise enhanced-codec rewriting or redirected master playlists with relative URLs; neither scenario has a confirmed live playback reproduction.
+
+## v68.5.29 (2026-10-15)
+
+### Repository updates
+
+- Restyle Discord notifications with compact repository cards, clearer titles, consistent status colors, actor footers and release download links.
+- Consolidate project and browser checks into one CI workflow and retain the required release-tests status without rerunning its tests.
+- Run source and workflow validation before publishing and announce automated releases directly to Discord.
+- Add weekly GitHub Actions and npm dependency updates.
+
+### Distribution
+
+- Advance the vaft userscript version to 68.5.29 for this maintenance release. Playback code and the internal version (114) are unchanged.
+- Include both vaft install formats, the seven-script ZIP bundle and SHA256SUMS.
+
+## v68.5.28 (2026-10-15)
+
+- Preserve original media sequence numbers when replaying cached recovery content. Replace the ad media section, retain a contiguous live segment run, and preserve its encryption, init-map and discontinuity metadata. Applies to both vaft and video-swap-new install formats.
+- Resolve relative segment and inline HLS URLs against the fetched playlist URL before ad detection and caching, including redirected native and backup playlists. Also applies to the standalone strip script.
+- Restrict Brave retries to explicit integrity rejections without data in every batch response. Preserve successful, partially successful and ordinary GraphQL error responses without replaying their operations. Apply the same rejection classification to uBlock diagnostics.
+- Versions: vaft 68.5.28 (internal 114), video-swap-new 1.90 (internal 58), Brave helper 1.3.4 (internal 8), strip 1.11 (internal 28).
+
+### Validation
+
+- Passed 255 runtime assertions, 147 Node tests, ESLint and packaging verification for all seven scripts.
+- Passed all 195 offline browser tests across Chromium, Firefox and WebKit, including regressions for recovery sequence numbering, relative ad media blocking and partially successful GraphQL batches.
+
+## v68.5.27 (2026-10-15)
+
+- Bound Brave manager retries to 15 seconds and pass caller cancellation through to the manager transport. Keep the retry hook active in either userscript/uBlock helper load order. Brave helper version 1.3.3 (internal version 7).
+- Handle omitted fetch options, Request inputs and standard header formats in video-swap-new. Keep the token relay timeout active through response body reads. Version 1.89 (internal version 57), in both install formats.
+- Add ESLint with browser, worker and Node environments, uBlock resource processing and CI checks. Record existing violations in an ESLint suppression baseline.
+- Restrict both Brave helpers to the HTTPS Twitch GQL and integrity endpoints. Reject lookalike hosts, unrelated paths, credentials and nonstandard ports.
+- Remove the Brave userscript's hard-coded Host header so retries to passport.twitch.tv use the destination host.
+- Set project Prettier defaults to four spaces and single quotes; exclude uBlock resources and generated release artifacts.
+
+
+### Validation
+
+- Passed ESLint with 32 pre-existing findings recorded in its suppression baseline, 255 runtime assertions and 125 Node tests.
+- Passed 154 browser tests locally. Windows WebKit skipped 20 native-media tests; the release workflow runs those cases on Linux.
+- Added regression coverage for Brave helper load order, retry timeout/cancellation, modern manager failures, and video-swap-new fetch inputs and response-body timeout.
+
+### Distribution
+
+- Release version 68.5.27 (vaft internal version 113), Brave helper 1.3.3 (internal version 7), and video-swap-new 1.89 (internal version 57).
+- Vaft's playback logic is unchanged in this patch; its version advances with the release bundle.
+- Includes all seven installable scripts in the ZIP bundle and SHA256SUMS.
+
+### Known issue
+
+- The Brave userscript still retries GraphQL responses containing errors, including partially successful responses. Restricting those retries is deferred.
+
+## v68.5.26 (2026-10-15)
+
+### Fixed
+
+- Recover an ad backup whose playhead stops even when no ad segments are being stripped and only one buffered range remains. Require observed playback, wait eight seconds after existing reload/switch grace periods, and request a hard player reset with a fresh token.
+- Limit the new detector to one recovery request per frozen run. Re-arm after playback resumes beyond reload grace, and respect pauses, seeks, stream changes and startup.
+
+### Tests
+
+- Add regression coverage for frozen backup playback, grace periods, retry limits and native-media recovery in the browser.
+- Local validation passed 255 runtime assertions, 112 Node tests and 130 browser tests. Windows WebKit skipped 20 native-media cases; the release workflow runs the full suite on Linux.
+
+### Distribution
+
+- Vaft 68.5.26 (internal version 112), with matching userscript and uBlock recovery logic.
+- Includes the userscript, uBlock resource, seven-script ZIP bundle and SHA256SUMS.
+
+## v68.5.25 (2026-10-15)
+
+### Fixed
+
+- Match recovery messages on the Drops page to the live mini-player's playlist channel. Keep recovery running when the same stream moves between its channel page and Drops; cancel it if the channel changes.
+
+### Code cleanup
+
+- Share early-reload budget checks and ad-end tracking resets between vaft worker paths. Remove the unreachable soft-reload branch and its ineffective configuration option. Keep existing reload decisions and limits.
+- Share script-function loading across the Node tests, worker validation and benchmark. Benchmark the current vaft source instead of copied historical implementations; run it with `npm run benchmark`.
+- Remove the obsolete comparison document, which described retired testing scripts and older upstream versions.
+
+### Tests
+
+- Cover Drops navigation and recovery with worker messages, replacement native media, mute restoration and stale-channel rejection.
+- Add coverage for shared reload decisions, post-ad actions and helper execution inside injected browser workers.
+- Local validation passed 255 runtime assertions, 104 Node tests and 126 browser tests. Windows WebKit skipped 18 native-media cases because it cannot decode the PCM fixture; the release workflow runs the full suite on Linux.
+
+### Distribution
+
+- Vaft 68.5.25 (internal version 111), including the unreleased v68.5.24 refactor. Both userscript and uBlock formats include the Drops recovery fix.
+- The release includes the userscript, uBlock resource, seven-script ZIP bundle and SHA256SUMS.
+
+## v68.5.23 (2026-10-15)
+
+### Project cleanup
+
+- Maintain the project on `master` with one supported version of each script. Remove the separate vaft and video-swap-new testing scripts from the repository and current release bundle.
+- Retire the VOD CSAI beta release and remove obsolete project branches.
+- Simplify the README, keep the badges, and point installation links to `master` for both userscript and uBlock formats.
+- Run the vaft regression suite against both supported install formats and retain PiP coverage in the runtime checks.
+
+### Distribution
+
+- Vaft 68.5.23 (internal version 109). Playback logic matches v68.5.22.
+- The release bundle contains seven supported scripts and SHA256SUMS.
+
+## v68.5.22 (2026-10-15)
+
+### Fixed
+
+- Honor required post-ad player resets even when playback is moving near the live edge. The previous health check could skip cleanup after backup playback or segment stripping and leave audio/video desync unresolved ([#26](https://github.com/xBandaku/TwitchAdSolutions/pull/26)).
+- Restore a temporary pre-mute when recovery fails or is cancelled. Preserve user mute changes and leave replacement videos alone ([#22](https://github.com/xBandaku/TwitchAdSolutions/pull/22)).
+- Upgrade an active soft recovery when a hard reset is requested. Keep one shared recovery promise and bounded retries, with one final hard attempt allowed after both soft attempts have started ([#23](https://github.com/xBandaku/TwitchAdSolutions/pull/23)).
+
+### Tests and releases
+
+- Exercise recovery with native browser media and simulated Twitch player state. Cover failed reloads, mute intent, replacement-player resume, overlapping requests, pause and PiP cancellation, and required resets near the live edge ([#25](https://github.com/xBandaku/TwitchAdSolutions/pull/25), [#26](https://github.com/xBandaku/TwitchAdSolutions/pull/26)).
+- Run the full Node and browser suites before publishing. Build and verify the userscript, uBlock resource, ZIP bundle and SHA256 checksums. Normalize script line endings for consistent packages ([#24](https://github.com/xBandaku/TwitchAdSolutions/pull/24)).
+
+### Distribution
+
+- Stable vaft 68.5.22 (internal version 108) and testing vaft 692.0.0 (internal version 692), including their uBlock variants.
+- Update the README's versioned uBlock resources to v68.5.22.
+- Release downloads include the stable userscript, stable uBlock resource, a bundle of all 10 installable scripts, and SHA256SUMS.
+
+### Validation
+
+- Passed 393 runtime assertions, 104 Node tests, and 207 offline browser tests across Chromium, Firefox and WebKit.
+- GitHub checks passed on Node.js 22 and 24, Windows and Linux, including workflow lint and release checks.
+- The maintainer reported working live Twitch playback with v68.5.22 after reporting post-ad audio/video desync in v68.5.19. The automated fixtures verify recovery behavior; they do not measure perceptual audio/video alignment on live Twitch.
+
+## v68.5.19 (2026-10-15)
+
+### Fixed
+
+- Accept GQL fetches with omitted headers, header tuples, Headers objects, URL inputs, and Request inputs without crashing the hook ([#13](https://github.com/xBandaku/TwitchAdSolutions/pull/13)).
+- Reject failed playlist body reads and processing errors instead of leaving requests pending ([#14](https://github.com/xBandaku/TwitchAdSolutions/pull/14)).
+- Process signed playlist URLs and extensionless v2 variants. Resolve relative variant URLs and preserve Request headers and cancellation ([#15](https://github.com/xBandaku/TwitchAdSolutions/pull/15), [#21](https://github.com/xBandaku/TwitchAdSolutions/pull/21)).
+- Limit backup requests to 4 seconds, including response bodies, and each backup search to 8 seconds. Validate HLS responses and wait 3 seconds before retrying an exhausted search ([#16](https://github.com/xBandaku/TwitchAdSolutions/pull/16)).
+- Process playlist state updates in order. Ignore obsolete stream sessions, superseded master responses, and actions from replaced workers ([#17](https://github.com/xBandaku/TwitchAdSolutions/pull/17)).
+- Require advancing clean playlists before ending an ad break. Keep the recovery timeout alive across alternating ad markers ([#18](https://github.com/xBandaku/TwitchAdSolutions/pull/18), fixes [#11](https://github.com/xBandaku/TwitchAdSolutions/issues/11)).
+- Use the freeze count captured before cleanup when deciding whether post-ad recovery needs a reload ([#19](https://github.com/xBandaku/TwitchAdSolutions/pull/19), fixes [#10](https://github.com/xBandaku/TwitchAdSolutions/issues/10)).
+- Prefer a backup from the current video codec family before matching resolution and frame rate ([#20](https://github.com/xBandaku/TwitchAdSolutions/pull/20), fixes [#12](https://github.com/xBandaku/TwitchAdSolutions/issues/12)).
+- Coalesce overlapping reloads, wait through player replacement, and resume the current player. Verify playback advances and stop after two attempts of up to 6 seconds each. Respect navigation, user pause, PiP, iOS soft reloads, and settings changed during recovery ([#21](https://github.com/xBandaku/TwitchAdSolutions/pull/21)).
+
+### Distribution
+
+- Applies to stable vaft 68.5.19 and testing vaft 689.0.0, including their uBlock variants.
+- Update the README's versioned uBlock resources to v68.5.19.
+- Backup deadlines, playlist ordering, clean-playlist checks, and recovery logic were selectively adapted from [Antidrew's playback recovery branch](https://github.com/antidrew/TwitchAdSolutions/commit/a1c0bbe161591ceb882f1f5e5c7731ac51df2653).
+
+### Validation
+
+- Passed 393 runtime assertions, 88 Node tests, and 123 offline browser tests across Chromium, Firefox, and WebKit.
+- GitHub checks passed on Node.js 22 and 24, Windows and Linux, including workflow lint.
+- The maintainer reported successful live Twitch playback with v68.5.19. The automated browser fixtures use offline Twitch pages.
+
+## v68.5.10 (2026-10-15)
+
+### Documentation
+- Simplify installation steps and group stable and development downloads in a script table. Keep the existing README badges ([#9](https://github.com/xBandaku/TwitchAdSolutions/pull/9)).
+- Condense configuration into a table, clarify vaft-only settings and the 360p autoplay fallback, and shorten troubleshooting and alternative-tool links.
+- Include the release-workflow test command in the development instructions. Update uBlock permalinks to v68.5.10.
+
+### Distribution
+- Update the userscript version to 68.5.10 so this release includes the cleaned README in its source archive. Playback logic is unchanged from v68.5.9.
+
+### Validation
+- Checked GitHub Markdown rendering, 14 local links and anchors, eight documented settings, and both configuration examples.
+
+## v68.5.9 (2026-10-15)
+
+### Fixed
+- Reacquire the current player-owned video for delayed post-reload unmute and drift correction. Keep separate ad videos muted, leave replaced elements alone, and skip live recovery after VOD navigation or player unmount. Applies to vaft 68.5.9 and vaft testing 680.0.0, including their uBlock variants ([#2](https://github.com/xBandaku/TwitchAdSolutions/pull/2)).
+
+### Tests and releases
+- Run helper tests against the shipped vaft functions ([#3](https://github.com/xBandaku/TwitchAdSolutions/pull/3)).
+- Check Node.js 22 and 24 on Windows and Linux. Validate JavaScript syntax, userscript metadata, paired userscript/uBlock logic, serialized workers, and packaged files ([#5](https://github.com/xBandaku/TwitchAdSolutions/pull/5), [#7](https://github.com/xBandaku/TwitchAdSolutions/pull/7)).
+- Run offline browser fixtures in Chromium, Firefox, and WebKit. Save browser reports, failure traces, and installable script artifacts in GitHub Actions ([#7](https://github.com/xBandaku/TwitchAdSolutions/pull/7)).
+- Extract notes for the selected version, attach the stable userscript, and reject publishing from other branches or reusing an existing tag. Release dry runs and repeatable publishing tests are available ([#6](https://github.com/xBandaku/TwitchAdSolutions/pull/6)).
+
+### Documentation
+- Correct backup-pinning defaults and explain the 360p fallback ([#4](https://github.com/xBandaku/TwitchAdSolutions/pull/4)).
+- Refresh the fork README and link installation to the latest stable release. Update uBlock permalinks to v68.5.9.
+
+### Validation
+- Passed 393 runtime assertions, 40 project checks, and 11 release-workflow tests.
+- Passed 111 offline browser tests across Chromium, Firefox, and WebKit.
+- A short manual live-stream recording showed playback continuing with the autoplay backup active. Post-ad recovery to full quality and native picture-in-picture behavior still need manual verification.
+
+## v68.5.8 (2026-10-15)
+
+### Fixed
+- Keep the vaft buffer monitor scheduled after a failed tick and share one timer with visibility wakeups ([#242](https://github.com/ryanbr/TwitchAdSolutions/pull/242)).
+- Rebuild relayed responses with null bodies for statuses 204, 205 and 304. Reject invalid statuses and response-construction errors instead of leaving fetches pending ([#243](https://github.com/ryanbr/TwitchAdSolutions/pull/243)).
+- Keep the GQL abort timeout active through the response-body read. Cap spoofed ads at the declared pod length and avoid claiming completion when the pod length is unknown ([#240](https://github.com/ryanbr/TwitchAdSolutions/pull/240)).
+- Seek past buffered gaps after three frozen playback intervals during live CSAI breaks. Preserve deliberate pauses and reset gap tracking outside eligible breaks ([#244](https://github.com/ryanbr/TwitchAdSolutions/pull/244)).
+- Restrict visibility-driven auto-resume to live streams in vaft and video-swap-new. Preserve paused VODs and use the player-owned video element. Vaft also respects recorded pause intent; testing retries verify the current player and content type ([#245](https://github.com/ryanbr/TwitchAdSolutions/issues/245)).
+- Restore the release PiP reload guard in vaft testing. Use pause/play while PiP is active and preserve paused playback ([#262](https://github.com/ryanbr/TwitchAdSolutions/issues/262)). Browser-native PiP behavior still needs field testing.
+
+### Diagnostics
+- Add a worker-lifetime spoofed-ad count and clarify that spoofing is disabled by default. Keep the existing CSAI request counters ([#235](https://github.com/ryanbr/TwitchAdSolutions/pull/235)).
+- Correct the release worker-crash comment: its direct reload bypasses the worker-side cooldown ([#234](https://github.com/ryanbr/TwitchAdSolutions/pull/234)).
+
+### Distribution
+- Set Violentmonkey page injection explicitly. Point userscript updates and installation links to this fork.
+- Includes vaft 68.5.8, vaft testing 679.0.0, and video-swap-new 1.88.
+
 ## v68.5.7 (2026-08-27)
 
 ### Debug Logging

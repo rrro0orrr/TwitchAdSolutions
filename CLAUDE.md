@@ -1,10 +1,10 @@
 # TwitchAdSolutions
 
-Fork of pixeltris/TwitchAdSolutions (archived). Remote `origin` = pixeltris, remote `master` = ryanbr.
+Fork of ryanbr/TwitchAdSolutions, originally based on pixeltris/TwitchAdSolutions (archived). Remote `origin` = xBandaku, remote `upstream` = ryanbr.
 
 ## Worker Blob Serialization (CRITICAL)
 
-Functions serialized via `.toString()` into the Web Worker blob CANNOT reference outer-scope variables. This includes: `processM3U8`, `stripAdSegments`, `hookWorkerFetch`, `getAccessToken`, `gqlRequest`, `hasAdTags`, `getMatchedAdSignifiers`, `notifyAdComplete`, `getStreamUrlForResolution`, `parseAttributes`, `getServerTimeFromM3u8`, `replaceServerTimeInM3u8`, `pruneStreamInfos`, `createStreamInfo`, `getWasmWorkerJs`, `videoCodecFamily`.
+Functions serialized via `.toString()` into the Web Worker blob CANNOT reference outer-scope variables. This includes: `processM3U8`, `stripAdSegments`, `resolvePlaylistUrls`, `hookWorkerFetch`, `getAccessToken`, `gqlRequest`, `hasAdTags`, `getMatchedAdSignifiers`, `notifyAdComplete`, `getStreamUrlForResolution`, `parseAttributes`, `getServerTimeFromM3u8`, `replaceServerTimeInM3u8`, `pruneStreamInfos`, `createStreamInfo`, `getWasmWorkerJs`, `videoCodecFamily`, `resetAdEndTracking`, `triggerEarlyReloadIfNeeded`.
 
 - Declare variables in `declareOptions()` (also serialized) or in the inline blob template literal
 - To pass window-scope values to the worker, inject after `declareOptions(self)`: e.g. `ReloadPlayerAfterAd = ${ReloadPlayerAfterAd};`
@@ -14,9 +14,7 @@ Functions serialized via `.toString()` into the Web Worker blob CANNOT reference
 
 Synced pairs (same logic, different format):
 - `vaft/vaft.user.js` + `vaft/vaft-ublock-origin.js`
-- `vaft/vaft_testing.user.js` + `vaft/vaft-testing-ublock-origin.js`
 - `video-swap-new/video-swap-new.user.js` + `video-swap-new/video-swap-new-ublock-origin.js`
-- `video-swap-new/video-swap-new-ublock-origin-testing.js` (testing only)
 - `strip/strip.user.js` (standalone)
 
 uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS — uBlock resource header).
@@ -32,7 +30,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.7/93, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.0/678, video-swap-new -/621.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.40/125, video-swap-new 1.94/62, strip 1.12/29.
 
 ## localStorage Config
 
@@ -50,10 +48,9 @@ All read at init, injected into worker blob:
 - `twitchAdSolutions_fastAutoplayFirstTry` — opt-out (default `true` as of v67.1.0). Prepend autoplay (360p) to position 0 of the iteration when the prior break committed autoplay via PreferLowQualityBackup escape hatch. Saves ~1.5-2s of probe-loop buffering. Auto-resets when a Source-tier type wins (channel recovered) so quality returns to full automatically. Set to `'false'` to force full Source-tier probe on every break (vaft only)
 - `twitchAdSolutions_recoverFromSilentMute` — opt-out (default `true`). On hard reload, if the element is already muted but vaft has successfully unmuted at any point earlier this session, recover via the 5500ms backstop (Twitch's silent re-mute pattern — issue #200). Disable via `'false'` if you deliberately mute mid-session and want that preserved across reloads. Users muted from session start are always respected (vaftEverUnmuted=false short-circuits the recovery check). vaft only.
 - `twitchAdSolutions_disableAdSpoofing` — opt-in via `'false'` (default `'true'` — spoofing is OFF). When enabled, on ad detect vaft fires the GQL ad-tracking beacons (`video_ad_impression`, `video_ad_quartile_complete` × 4, `video_ad_pod_complete`) that Twitch's player would have sent if the ad had played normally. Originally intended to mimic the ad-completion signal Twitch expects and may reduce detection escalation — but the always-100%-watched + audible + visible beacon pattern may itself fingerprint as anomalous (silently, without GQL rejection) and trigger detection escalation in the other direction (observed correlation with CSAI ads reaching committed backups + TTV-AB maintainer hypothesis). Default flipped from on→off after v68.2.0. Set to `'false'` to re-enable (for A/B testing whether spoofing affects ad break duration / CSAI escalation on your channels). Failures swallowed (never blocks ad-block flow). vaft only.
-- `twitchAdSolutions_disableInAdGapSeek` — opt-out via `'true'` (default off = feature on). Disables the in-ad frozen-buffer-gap seek (v660, TTV-AB #33 mirror) for A/B isolation of mid-break pause/loading-circle reports. vaft testing only.
-- `twitchAdSolutions_disableInAdFreezeReload` — opt-out via `'true'` (default off = feature on). Disables the in-ad frozen-playhead reload escalation (v662, audio-gap CSAI backstop) for A/B isolation. vaft testing only.
 - `twitchAdSolutions_disablePostBreakWedge` — opt-out via `'true'` (default off = feature on). Disables the post-break video-wedge recovery (v667/v68.5.0, TTV-AB _checkPostBreakWedge mirror) for A/B isolation.
-- `twitchAdSolutions_disableBackgroundResume` — opt-out via `'true'` (default off = feature on). Disables the hidden-tab resume guard (v672, issue #255): a Twitch-initiated pause while the tab is hidden is resumed with a retry chain (strike-capped so a deliberate media-key pause is respected) instead of staying paused until tab focus. vaft testing only.
+
+- `twitchAdSolutions_pageRefreshFallback` -- opt-in via `true`, vaft only. After two timed-out recovery attempts and 3 additional stalled seconds, refresh the document if the same video/route remains live and unpaused. Session storage timestamp `twitchAdSolutions_lastPageRefreshAt` limits it to once every 5 minutes per tab; fail closed on unavailable storage. Never trigger from success, exception, cancellation or unavailable-player outcomes.
 
 ## CSAI vs SSAI
 
@@ -67,11 +64,12 @@ All read at init, injected into worker blob:
 - **Reload cooldown** — 30s default, auto-escalates to 90s if 3+ reloads in 5 minutes.
 - **Reload cap** — buffer monitor reloads at most once per recovery window (`recoveryReloadUsed`).
 - **Grace periods** — 15s after reload, 10s after backup switch. Buffer monitor skips fixes during these.
+- Ad backup stalls: after observed playback, three seconds without playhead movement with readiness <=2 and <=0.1s buffered at the current position, otherwise eight seconds, during a break requests a hard reset even without stripped segments or multiple buffered ranges. Respect pause, seek and existing grace periods. Allow one recovery request per frozen run; re-arm after playback progresses beyond reload grace.
 - **Drift correction** — `startDriftCorrection(videoElement)` shared function. 1.1× playback rate, 30s safety timeout. Restarts fresh on re-entry (clears stale timers). Used by post-reload drift and buffer gap seek.
-- **Reload routing** — worker → main `ReloadPlayer` messages carry a `kind` field. `doTwitchPlayerTask(isPausePlay, isReload, reloadKind)` picks `setSrc` params: `kind === 'early'` → hard reload (`isNewMediaPlayerInstance: true, refreshAccessToken: true`, new session); otherwise soft reload. The two flags are **not** coupled: on Apple touch devices `iosSoftReload` downgrades `isNewMediaPlayerInstance` to false while `refreshAccessToken` stays true (v68.5.5 — not yet validated on a device). Early reload sites (both sticky + normal paths) send `kind: 'early'`; post-ad reload sites send `'post-ad'` when `SoftReloadNoStrip` is on and the break stripped nothing (v68.5.0), `'early'` otherwise. HEVC force reload stays soft (codec change, no strip involved). Hard reload flushes the MediaSource buffer — required after strip activity (BLANK_MP4 injection, recovery replay) to avoid audio/video desync from accumulated timestamp drift.
+- **Reload routing**: worker messages with kind early request a new player and fresh token. Required post-ad resets use early after stripping or committed backup playback. Other reload requests remain soft. Apple touch devices keep the existing player while refreshing the token. The reset flushes mixed-source media buffers.
 - **Early reload** — fires during prolonged all-stripped freeze. Threshold: 3 polls (~6s), or 1 poll when recovery cache <3 segments (thin-cache fast path). Budget: `max(1, PodLength)` or `max(2, PodLength)` when thin. `EarlyReloadTriggered` resets on "still ads" (both sticky + normal paths) to allow budget-based re-fire. Override via `twitchAdSolutions_earlyReloadPollThreshold`.
 - **Sticky CSAI fast path** — once a break enters CSAI fast path (all segments live), stays on it for the whole break. Has its own early-reload trigger + `EarlyReloadAwaitingResult` check (normal-path check unreachable due to early return).
-- **Latency-aware reload health check** — measures `seekable.end - currentTime` before skipping post-ad reload. If >7s behind live or seekable unavailable/garbage, proceeds with reload. Guards against 2^30 sentinel values via `Number.isFinite` + 3600s cap.
+- **Latency-aware reload health check**: optional reloads can be skipped when playback is within 7 seconds of live. Required `early` resets bypass this check because playback progress does not prove audio/video alignment. Unknown latency or values outside the 3600-second bound do not prevent a reload.
 - **User pause intent** — tracks video pause/play events to distinguish user vs script pauses. `weJustPaused` only resets when player wasn't paused (guards against clearing intent during stall recovery).
 - **Stale player ref** — `playerForMonitoringBuffering = null` on reload to force re-acquisition.
 - **StreamInfo factory** — `createStreamInfo()` declares all fields up-front (46 fields vaft, 31 fields video-swap-new). Serialized into worker blob.
@@ -82,11 +80,20 @@ All logs use `[AD DEBUG]` prefix. Logs in `.toString()` functions must use `cons
 
 ## Validation
 
-`npx acorn --ecma2022 file.js` (skip line 1 for uBlock files: `tail -n +2 file.js | npx acorn --ecma2022`). GitHub Actions validates on push/PR.
+Run `npm ci --ignore-scripts`, then `npm test` for syntax, metadata, paired-script/worker consistency, and runtime regressions. `npm run test:package` checks the installable artifacts. Run `npx playwright install` once, then `npm run test:browser` for offline Chromium, Firefox, and WebKit fixtures. GitHub Actions runs project checks on Node 22/24 and Windows/Linux, plus browser tests and workflow lint.
 
-## Testing
+## Evidence for playback findings
 
-Testing files include experimental features (ad completion spoofing, lower thresholds, removed pruneStreamInfos). Don't apply to main scripts without explicit request. Testing-script-only changes commit directly to master; PRs are for release scripts.
+- Use the labels `confirmed live`, `reproduced from a captured response`, or `synthetic edge case` in findings and PR descriptions. State the missing evidence and the scope of the reproduction. Captured-response replay is offline evidence, not a live browser playback test.
+- Claim a current Twitch playback bug only with a live reproduction or an unmodified triggering response. Label synthetic-only fixes as preventive hardening. HLS validity alone does not establish that Twitch sends an input.
+- Run `npm run test:captured` first. Keep fabricated playlists and mocked player behavior in the synthetic resilience suite. Never change a captured response to manufacture a trigger; put mutations in synthetic tests.
+- Refresh captures with `npm run capture:playlist -- <channel> <new-output.json> [playerType] [v1|v2]`. Review redactions before committing. Keep capture time, request parameters, HTTP status, final URL, redirect history and sanitization notes. Do not store raw token responses or private headers.
+- Report whether the failing path ran. No HEVC/AV1 variants means enhanced-codec rewrite coverage is absent, even if every request succeeded. A sample without the trigger cannot rule out the issue elsewhere.
+- For each regression, demonstrate failure before the fix for the expected reason and success afterward. Use `npm run test:regression -- <before-ref> <test-name-pattern> <expected-error>` or record equivalent manual commands and output. This verifies the test, not production impact.
+
+## Branches and releases
+
+master is the only project branch. Commit changes to master after validation. Maintain one version of each script, with matching userscript and uBlock formats where both exist. Tagged releases are snapshots of master; do not add separate beta or testing scripts.
 
 ## Backup Player Types
 

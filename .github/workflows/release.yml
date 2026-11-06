@@ -2,69 +2,194 @@ name: Create Release
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate without creating a tag or publishing a release
+        type: boolean
+        default: true
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   create-release:
-    permissions:
-      contents: write
     name: Create Release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
-    - name: Install acorn
-      run: npm install -g acorn
-
-    - name: Validate userscripts
-      run: |
-        for f in vaft/vaft.user.js vaft/vaft_testing.user.js video-swap-new/video-swap-new.user.js strip/strip.user.js; do
-          echo "Validating $f..."
-          acorn --ecma2022 "$f" > /dev/null
-        done
-
-    - name: Validate uBlock scripts
-      run: |
-        for f in vaft/vaft-ublock-origin.js vaft/vaft-testing-ublock-origin.js video-swap-new/video-swap-new-ublock-origin.js video-swap-new/video-swap-new-ublock-origin-testing.js; do
-          echo "Validating $f..."
-          tail -n +2 "$f" | acorn --ecma2022 > /dev/null
-        done
-
-    - name: Get version from script
-      id: version
-      run: |
-        VERSION=$(grep -m1 '@version' vaft/vaft.user.js | sed 's/.*@version\s*//')
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-    - name: Set up Git user
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-    - name: Update permalink hashes in README
-      run: |
-        CURRENT_HASH=$(git rev-parse HEAD)
-        sed -i "s|/ryanbr/TwitchAdSolutions/[a-f0-9]\{40\}/|/ryanbr/TwitchAdSolutions/${CURRENT_HASH}/|g" README.md
-        git add README.md
-
-    - name: Create version commit and tag
-      run: |
-        git commit -m "v${{ steps.version.outputs.version }}"
-        git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-        git push origin master
-        git push origin "v${{ steps.version.outputs.version }}"
-
-    - name: Create Release
-      uses: softprops/action-gh-release@v2
+    - uses: actions/setup-node@v7
       with:
-        tag_name: "v${{ steps.version.outputs.version }}"
-        name: "Release v${{ steps.version.outputs.version }}"
-        body_path: CHANGELOG.md
+        node-version: '24'
+        cache: npm
+
+    - name: Install test dependencies
+      run: npm ci --ignore-scripts
+
+    - name: Lint source and compile notification script
+      run: |
+        npm run lint
+        python -m compileall -q .github
+        python -m unittest discover -s .github/scripts -p "test_*.py" -v
+
+    - name: Validate workflows
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: bash .github/scripts/lint-workflows.sh
+
+    - name: Run unit tests
+      run: npm test
+
+    - name: Install browser dependencies
+      run: npx playwright install --with-deps
+
+    - name: Run browser recovery and worker tests
+      run: npm run test:browser
+
+    - name: Package installable scripts and checksums
+      run: npm run test:package
+
+    - name: Prepare release notes
+      id: release
+      shell: bash
+      run: |
+        node <<'NODE'
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const script = fs.readFileSync('vaft/vaft.user.js', 'utf8').replace(/\r\n/g, '\n');
+        const version = /^\/\/ @version[ \t]+(\d+\.\d+\.\d+)[ \t]*$/m.exec(script)?.[1];
+        if (!version) throw new Error('Expected a stable x.y.z @version in vaft/vaft.user.js');
+        const sections = fs.readFileSync('CHANGELOG.md', 'utf8').replace(/\r\n/g, '\n').split(/^## /m).slice(1).map(section => {
+          const [heading, ...body] = section.split('\n');
+          return { heading: heading.trim(), body: body.join('\n').trim() };
+        });
+        const notes = sections.find(section => section.heading === 'v' + version || section.heading.startsWith('v' + version + ' '))
+          ?? sections.find(section => section.heading === 'Unreleased');
+        if (!notes?.body) throw new Error('No release notes found for vaft ' + version);
+        fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'release-notes.md'), notes.body + '\n');
+        fs.appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + version + '\n');
+        console.log('Prepared release notes for vaft ' + version);
+        NODE
+
+    - name: Build and verify release bundle
+      env:
+        VERSION: ${{ steps.release.outputs.version }}
+        RELEASE_DIR: release-artifact
+      run: |
+        python <<'PY'
+        import hashlib
+        import os
+        import re
+        import zipfile
+        from pathlib import Path
+
+        version = os.environ['VERSION']
+        if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+            raise ValueError('Expected a stable release version')
+        root = Path(os.environ['RELEASE_DIR']).resolve()
+        manifest = (root / 'SHA256SUMS').read_bytes()
+        entries = {}
+        for line in manifest.decode('utf-8').splitlines():
+            digest, name = line.split('  ', 1)
+            source = (root / name).resolve()
+            source.relative_to(root)
+            payload = source.read_bytes()
+            if hashlib.sha256(payload).hexdigest() != digest:
+                raise ValueError('Checksum mismatch: ' + name)
+            if name in entries:
+                raise ValueError('Duplicate bundle entry: ' + name)
+            entries[name] = payload
+        if not entries:
+            raise ValueError('Release manifest is empty')
+        entries['SHA256SUMS'] = manifest
+        archive = root / ('TwitchAdSolutions-v' + version + '.zip')
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            for name, payload in entries.items():
+                entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                entry.compress_type = zipfile.ZIP_DEFLATED
+                entry.external_attr = 0o100644 << 16
+                bundle.writestr(entry, payload)
+        with zipfile.ZipFile(archive) as bundle:
+            for name, payload in entries.items():
+                if bundle.read(name) != payload:
+                    raise ValueError('Bundle verification failed: ' + name)
+        print('Verified ' + str(len(entries)) + ' release bundle entries')
+        PY
+
+    - name: Summarize dry run
+      if: ${{ inputs.dry_run }}
+      env:
+        VERSION: ${{ steps.release.outputs.version }}
+      run: |
+        {
+          echo "Dry run for v$VERSION. No tag or release was created."
+          echo
+          echo 'Assets: vaft.user.js, vaft-ublock-origin.js, script bundle, SHA256SUMS'
+          echo
+          cat "$RUNNER_TEMP/release-notes.md"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload release preview
+      if: ${{ inputs.dry_run }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: release-preview-${{ steps.release.outputs.version }}
+        path: release-artifact/
+        if-no-files-found: error
+        retention-days: 7
+
+    - name: Check publish target
+      if: ${{ !inputs.dry_run }}
+      env:
+        TAG: v${{ steps.release.outputs.version }}
+      run: |
+        if [[ "$GITHUB_REF" != refs/heads/master ]]; then
+          echo '::error::Release publishing requires the master branch.'
+          exit 1
+        fi
+        if git show-ref --verify --quiet "refs/tags/$TAG"; then
+          echo "::error::Tag $TAG already exists. Bump the userscript version before publishing."
+          exit 1
+        fi
+
+    - name: Publish release
+      if: ${{ !inputs.dry_run }}
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: v${{ steps.release.outputs.version }}
+        target_commitish: ${{ github.sha }}
+        name: Release v${{ steps.release.outputs.version }}
+        body_path: ${{ runner.temp }}/release-notes.md
+        files: |
+          release-artifact/vaft/vaft.user.js
+          release-artifact/vaft/vaft-ublock-origin.js
+          release-artifact/TwitchAdSolutions-v${{ steps.release.outputs.version }}.zip
+          release-artifact/SHA256SUMS
+        fail_on_unmatched_files: true
+        overwrite_files: false
+        make_latest: true
         draft: false
         prerelease: false
+
+    # GITHUB_TOKEN releases do not trigger the separate release event workflow.
+    - name: Announce published release
+      if: ${{ !cancelled() && success() && inputs.dry_run == false }}
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        TAG: v${{ steps.release.outputs.version }}
+        NOTIFICATION_EVENT_NAME: release
+        NOTIFICATION_EVENT_ACTION: published
+      run: |
+        gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '{action: "published", release: ., sender: .author}' > "$RUNNER_TEMP/release-event.json"
+        NOTIFICATION_EVENT_PATH="$RUNNER_TEMP/release-event.json" python3 .github/scripts/discord_notify.py

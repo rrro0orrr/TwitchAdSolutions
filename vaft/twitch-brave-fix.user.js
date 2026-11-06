@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (twitch-brave-fix)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      1.3.1
-// @description  Bypass Brave fingerprint detection on Twitch GQL/integrity requests by retrying via GM_xmlHttpRequest with header spoofs (Sec-Ch-Ua brand rewrite from Brave to Google Chrome with synthetic fallback when userAgentData hidden, Sec-Ch-Ua-Platform, Sec-Ch-Ua-Mobile, Firefox User-Agent, explicit Origin/Referer/Host, Accept-Language). Also hides navigator.brave and rebrands navigator.userAgentData.brands / getHighEntropyValues from "Brave" to "Google Chrome" so Twitch JS can't preemptively flag the session. Per-request retry: each interceptable request goes native first, sniffs for `errors` in the response body, and retries that specific request via GM xhr if needed — fixes occasional fingerprint-driven failures (e.g. Brave login on www.twitch.tv) without paying the GM xhr tax on every successful request. Companion to vaft / video-swap-new. A uBlock Origin scriptlet variant (twitch-brave-fix-ublock-origin.js) is also available but covers JS-surface spoofs only — the GM xhr header-retry path is userscript-exclusive (Tampermonkey / Violentmonkey / Greasemonkey 4+).
-// @updateURL    https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/twitch-brave-fix.user.js
-// @downloadURL  https://github.com/ryanbr/TwitchAdSolutions/raw/master/vaft/twitch-brave-fix.user.js
+// @version      1.3.5
+// @description  Bypass Brave fingerprint detection on Twitch GQL/integrity requests by retrying via GM_xmlHttpRequest with header spoofs (Sec-Ch-Ua brand rewrite from Brave to Google Chrome with synthetic fallback when userAgentData hidden, Sec-Ch-Ua-Platform, Sec-Ch-Ua-Mobile, Firefox User-Agent, explicit Origin/Referer, Accept-Language). Also hides navigator.brave and rebrands navigator.userAgentData.brands / getHighEntropyValues from "Brave" to "Google Chrome" so Twitch JS can't preemptively flag the session. Per-request retry: each interceptable request goes native first, retries explicit integrity rejections via GM xhr only when the entire response has no data or ordinary GraphQL errors — fixes occasional fingerprint-driven failures (e.g. Brave login on www.twitch.tv) without paying the GM xhr tax on every successful request. Companion to vaft / video-swap-new. A uBlock Origin scriptlet variant (twitch-brave-fix-ublock-origin.js) is also available but covers JS-surface spoofs only — the GM xhr header-retry path is userscript-exclusive (Tampermonkey / Violentmonkey / Greasemonkey 4+).
+// @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/twitch-brave-fix.user.js
+// @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/twitch-brave-fix.user.js
 // @author       https://github.com/ryanbr/TwitchAdSolutions
 // @match        *://*.twitch.tv/*
 // @run-at       document-start
@@ -27,13 +27,12 @@
         if (_clipHost === 'clips.twitch.tv' || /^\/[^/]+\/clip\/[^/]+/.test(_clipPath)) return;
     }
     'use strict';
-    const ourVersion = 5;
-    console.log('[TwitchBraveFix] v1.3.1 loading');
-    if (typeof window.twitchBraveFixVersion !== 'undefined' && window.twitchBraveFixVersion >= ourVersion) {
-        console.log('[TwitchBraveFix] CONFLICT: skipped — another instance already active (v' + window.twitchBraveFixVersion + ')');
+    const ourVersion = 9;
+    console.log('[TwitchBraveFix] v1.3.5 loading');
+    if (typeof window.twitchBraveFixRetryVersion !== 'undefined' && window.twitchBraveFixRetryVersion >= ourVersion) {
+        console.log('[TwitchBraveFix] CONFLICT: skipped — another instance already active (v' + window.twitchBraveFixRetryVersion + ')');
         return;
     }
-    window.twitchBraveFixVersion = ourVersion;
 
     // Hide navigator.brave before Twitch's bundle runs so navigator.brave.isBrave() can't preemptively
     // flag the session. Brave exposes this property even in Strict shields mode, so it's the most
@@ -87,13 +86,20 @@
         return;
     }
 
+    window.twitchBraveFixVersion = Math.max(window.twitchBraveFixVersion || 0, ourVersion);
+    window.twitchBraveFixRetryVersion = ourVersion;
     const realFetch = window.fetch;
 
     function isInterceptable(url) {
         if (typeof url !== 'string') return false;
-        return url.indexOf('gql.twitch.tv/gql') !== -1
-            || url.indexOf('gql.twitch.tv/integrity') !== -1
-            || url.indexOf('passport.twitch.tv/integrity') !== -1;
+        try {
+            const parsed = new URL(url, document.location.href);
+            if (parsed.protocol !== 'https:' || parsed.port || parsed.username || parsed.password) return false;
+            return (parsed.hostname === 'gql.twitch.tv' && (parsed.pathname === '/gql' || parsed.pathname === '/integrity'))
+                || (parsed.hostname === 'passport.twitch.tv' && parsed.pathname === '/integrity');
+        } catch (_e) {
+            return false;
+        }
     }
 
     // Spoof values are derived from navigator.userAgent / navigator.userAgentData, which don't
@@ -175,36 +181,18 @@
         });
     }
 
-    async function readBodyAsText(input, init) {
-        if (init && typeof init.body === 'string') return init.body;
-        if (init && init.body && typeof init.body.text === 'function') {
-            try { return await init.body.text(); } catch (_e) { return undefined; }
-        }
-        if (input instanceof Request) {
-            try { return await input.clone().text(); } catch (_e) { return undefined; }
-        }
-        return undefined;
+    async function readRetryBody(request) {
+        // Firefox can read the body even when Request.body is unavailable.
+        if (request.method === 'GET' || request.method === 'HEAD') return undefined;
+        const type = request.headers.get('content-type') || '';
+        return /^(?:text\/|application\/(?:json|x-www-form-urlencoded))/i.test(type)
+            ? request.text() : request.arrayBuffer();
     }
 
-    function collectHeaders(input, init) {
-        const out = {};
-        if (input instanceof Request && input.headers) {
-            input.headers.forEach((v, k) => { out[k] = v; });
-        }
-        if (init && init.headers) {
-            if (init.headers instanceof Headers) {
-                init.headers.forEach((v, k) => { out[k] = v; });
-            } else if (Array.isArray(init.headers)) {
-                for (const [k, v] of init.headers) out[k] = v;
-            } else {
-                for (const k of Object.keys(init.headers)) out[k] = init.headers[k];
-            }
-        }
-        return out;
-    }
-
-    async function gmRetry(url, method, bodyText, baseHeaders) {
+    async function gmRetry(url, method, bodyText, baseHeaders, signal) {
+        signal?.throwIfAborted();
         const spoofedSecChUa = await getSpoofedSecChUa();
+        signal?.throwIfAborted();
         const headers = Object.assign({}, baseHeaders || {});
         if (spoofedSecChUa) headers['Sec-Ch-Ua'] = spoofedSecChUa;
         headers['Sec-Ch-Ua-Mobile'] = SPOOF.mobile;
@@ -213,41 +201,73 @@
         headers['Accept-Language'] = 'en-US,en;q=0.9';
         headers['Referer'] = 'https://www.twitch.tv/';
         headers['Origin'] = 'https://www.twitch.tv/';
-        headers['Host'] = 'gql.twitch.tv';
         return new Promise((resolve, reject) => {
-            gmXhr({
-                method: method || 'GET',
-                url: url,
-                data: bodyText,
-                headers: headers,
-                onload: resp => resolve(resp),
-                onerror: err => reject(err),
-                ontimeout: () => reject(new Error('TwitchBraveFix: GM_xmlHttpRequest timeout')),
-            });
+            let request;
+            let settled = false;
+            const finish = (settle, value) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutId);
+                signal?.removeEventListener('abort', abort);
+                settle(value);
+            };
+            const abort = () => {
+                finish(reject, signal.reason);
+                request?.abort?.();
+            };
+            const timeoutMs = 15000;
+            const timeoutId = setTimeout(() => {
+                finish(reject, new DOMException('TwitchBraveFix: GM_xmlHttpRequest timeout', 'TimeoutError'));
+                request?.abort?.();
+            }, timeoutMs);
+            signal?.addEventListener('abort', abort, { once: true });
+            try {
+                request = gmXhr({
+                    method: method || 'GET',
+                    url: url,
+                    data: bodyText,
+                    headers: headers,
+                    timeout: timeoutMs,
+                    onload: resp => finish(resolve, resp),
+                    onerror: err => finish(reject, err),
+                    onabort: () => finish(reject, new DOMException('The request was aborted', 'AbortError')),
+                    ontimeout: () => finish(reject, new DOMException('TwitchBraveFix: GM_xmlHttpRequest timeout', 'TimeoutError'))
+                });
+                if (typeof request?.then === 'function') request.then(resp => finish(resolve, resp), err => finish(reject, err));
+            } catch (error) {
+                finish(reject, error);
+            }
         });
     }
 
-    async function maybeRetryOnErrors(url, method, headers, response, readBody) {
+    // A GraphQL execution error is not evidence of fingerprint rejection. Replay
+    // only a wholly rejected response; even data:null can indicate partial execution.
+    function isIntegrityRejection(parsed) {
+        const responses = Array.isArray(parsed) ? parsed : [parsed];
+        return responses.length > 0 && responses.every(response =>
+            response && typeof response === 'object' && !('data' in response)
+            && Array.isArray(response.errors) && response.errors.length > 0
+            && response.errors.every(error => typeof error?.message === 'string'
+                && /^(?:failed (?:client )?integrity check|(?:client )?integrity check failed|invalid (?:client )?integrity token|fingerprint validation failed)[.!]?$/i.test(error.message.trim())));
+    }
+
+    async function maybeRetryOnErrors(url, method, headers, response, readBody, signal) {
         if (response.status !== 200) return response;
         const cloned = response.clone();
         let bodyTextResp;
         try { bodyTextResp = await cloned.text(); } catch (_e) { return response; }
         let parsed;
         try { parsed = JSON.parse(bodyTextResp); } catch (_e) { return response; }
-        // Twitch's tell: HTTP 200 with a top-level `errors` field means fingerprint validation failed.
-        // Genuine GQL responses are either `data` or an array of `data`-shaped objects; `errors` only
-        // appears when the request was rejected at the gateway level.
-        if (typeof parsed?.errors === 'undefined' && !(Array.isArray(parsed) && parsed.some(p => typeof p?.errors !== 'undefined'))) {
-            return response;
-        }
-        console.log('[TwitchBraveFix] GQL errors detected on ' + url.replace(/\?.*$/, '') + ' — retrying via GM_xmlHttpRequest with header spoofs');
+        if (!isIntegrityRejection(parsed)) return response;
+        console.log('[TwitchBraveFix] Integrity rejection detected on ' + url.replace(/\?.*$/, '') + ' — retrying via GM_xmlHttpRequest with header spoofs');
         // Body is only needed on the retry path — defer the clone-and-decode until now so the
         // happy path doesn't pay for it on every interceptable request.
-        const bodyText = await readBody();
         try {
-            const gmResp = await gmRetry(url, method, bodyText, headers);
+            const bodyText = await readBody();
+            const gmResp = await gmRetry(url, method, bodyText, headers, signal);
             return gmRespToFetchResp(gmResp);
         } catch (e) {
+            signal?.throwIfAborted();
             console.log('[TwitchBraveFix] GM_xmlHttpRequest retry failed; returning original errored response:', (e && e.message) || e);
             return new Response(bodyTextResp, {
                 status: response.status,
@@ -262,20 +282,17 @@
     // "fetch never throws synchronously, always returns a Promise" contract for any caller
     // using `.catch()` without a preceding `.then()`.
     async function _interceptedFetch(input, init) {
-        const url = typeof input === 'string' ? input : (input && input.url) || '';
-        const method = (init && init.method) || (input && input.method) || 'GET';
-        const headers = collectHeaders(input, init);
-        // Capture the body lazily — for Request inputs we hold a pre-fetch clone since the
-        // original gets consumed by realFetch, but we only decode it if retry actually fires.
-        const bodyClone = (input instanceof Request) ? input.clone() : null;
-        const readBody = () => readBodyAsText(bodyClone || input, init);
-        const response = await realFetch.call(this, input, init);
-        return maybeRetryOnErrors(url, method, headers, response, readBody);
+        const request = new Request(input instanceof Request ? input : new URL(input, document.location.href), init);
+        const bodyClone = request.clone();
+        const headers = Object.fromEntries(request.headers);
+        const response = await realFetch.call(this, request);
+        return maybeRetryOnErrors(request.url, request.method, headers, response,
+            () => readRetryBody(bodyClone), request.signal);
     }
 
     window.fetch = function _braveFixFetch(input, init) {
         try {
-            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input && input.url) || '';
             if (!isInterceptable(url)) {
                 return realFetch.call(this, input, init);
             }
@@ -285,5 +302,5 @@
         }
     };
 
-    console.log('[TwitchBraveFix] window.fetch hook installed + navigator.brave hidden + userAgentData rebranded — per-request retry: native fetch first, retry via GM_xmlHttpRequest only when response carries `errors`');
+    console.log('[TwitchBraveFix] window.fetch hook installed + navigator.brave hidden + userAgentData rebranded — per-request retry: native fetch first, retry via GM_xmlHttpRequest only for wholly rejected integrity responses');
 })();
