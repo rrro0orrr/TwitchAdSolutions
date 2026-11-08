@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      68.5.40
+// @version      68.5.41
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 125;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 126;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'userscript';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -102,6 +102,7 @@
         scope.BackupSwapFirst = true;// On ad detect, immediately swap to a backup player-type m3u8 (TTV-AB-style). Avoids MediaSource mixing from strip activity — fewer loading circles in field. Cost: extra fetches on every ad break. Default on; set twitchAdSolutions_backupSwapFirst=false to disable.
         scope.DisableAdSpoofing = true;// Default OFF (was ON through v68.2.0). The always-100%-watched + audible + visible spoof beacon pattern may itself fingerprint as anomalous and trigger detection escalation (CSAI reaching the committed backup) — observed correlation in field + TTV-AB maintainer hypothesis. Spoof-accepted (no GQL rejection) does NOT prove not-fingerprinted; Twitch can 200-OK while using the beacon pattern as silent detection input. Opt in by setting twitchAdSolutions_disableAdSpoofing=false to re-enable the GQL ad-tracking beacons (video_ad_impression, video_ad_quartile_complete x 4, video_ad_pod_complete).
         scope.RecoverFromSilentMute = true;// On hard reload, if the element is already muted but vaft has successfully unmuted at any point earlier this session, treat it as a silent Twitch re-mute and recover via the backstop. Default on; set twitchAdSolutions_recoverFromSilentMute=false to disable (useful for users who deliberately mute mid-session).
+        scope.BlockClientSideAds = true;// Fail client-side ad requests (edge.ads.twitch.tv, vaes.amazon-adsystem.com) and strip the twitch-maf-ad DATERANGE that cues them. These ads play as a separate video outside the m3u8, so stripping and backup swaps never touch them. Set twitchAdSolutions_blockClientSideAds=false to turn it OFF.
         scope.DisablePostBreakWedge = false;// Post-break video-wedge recovery (mirrors GosuDRM/TTV-AB _checkPostBreakWedge, v12.0.0). Detects "audio running, video frozen" after an ad break — playhead advancing while the decoder emits no new frames — via getVideoPlaybackQuality().totalVideoFrames, which the currentTime-based freeze checks can't see. Default on. Set twitchAdSolutions_disablePostBreakWedge=true to turn it OFF.
         scope.SkipPlayerReloadOnHevc = false;// If true this will skip player reload on streams which have 2k/4k quality (if you enable this and you use the 2k/4k quality setting you'll get error #4000 / #3000 / spinning wheel on chrome based browsers). Despite the name, gates BOTH enhanced families (HEVC and AV1) since v68.5.3.
         scope.AlwaysReloadPlayerOnAd = false;// Always pause/play when entering/leaving ads
@@ -244,7 +245,7 @@
     // is one vaft never sees — nothing stripped, no backup searched, nothing else in the log.
     // The previous once-per-session latch could not surface that at all.
     const csaiRequestCounts = Object.create(null);
-    function countCsaiRequest(csaiType, transport) {
+    function countCsaiRequest(csaiType, transport, blocked) {
         const inBreak = playerBufferState.inAdBreak === true;
         const c = csaiRequestCounts[csaiType] || (csaiRequestCounts[csaiType] = { inBreak: 0, noBreak: 0 });
         const n = inBreak ? ++c.inBreak : ++c.noBreak;
@@ -253,9 +254,10 @@
         if (n !== 1 && n % 10 !== 0) { return; }
         const chan = playerBufferState.channelName ? ' on ' + playerBufferState.channelName : '';
         console.log('[AD DEBUG] CSAI ad request (' + transport + ') — type: ' + csaiType + chan
-            + (inBreak ? ' during a detected break' : ' with NO break detected — vaft never saw this ad')
-            + ' | this type so far: ' + c.noBreak + ' unseen, ' + c.inBreak + ' during breaks'
-            + (n === 1 ? ' (client-side insertion, not blockable via m3u8)' : ''));
+            + (inBreak ? ' during a detected break' : ' with NO break detected')
+            + (blocked ? ' — BLOCKED' : ' — let through (blockClientSideAds is off)')
+            + ' | this type so far: ' + c.noBreak + ' outside breaks, ' + c.inBreak + ' during breaks'
+            + (n === 1 ? ' (client-side insertion, not visible in the m3u8; home-page ads also report bp=midroll)' : ''));
     }
     let isActivelyStrippingAds = false;
     let localStorageHookFailed = false;
@@ -373,6 +375,8 @@
                 const alreadyHooked = prefetchedWorkerJs.includes('hookWorkerFetch');
                 const newBlobStr = `
                     const pendingFetchRequests = new Map();
+                    ${isClientSideAdRequestUrl.toString()}
+                    ${stripClientSideAdMarkers.toString()}
                     ${hasAdTags.toString()}
                     ${getMatchedAdSignifiers.toString()}
                     ${notifyAdComplete.toString()}
@@ -410,6 +414,7 @@
                     FastAutoplayFirstTry = ${FastAutoplayFirstTry};
                     BackupSwapFirst = ${BackupSwapFirst};
                     DisableAdSpoofing = ${DisableAdSpoofing};
+                    BlockClientSideAds = ${BlockClientSideAds};
                     ForceAccessTokenPlayerType = '${ForceAccessTokenPlayerType}';
                     GQLDeviceID = ${GQLDeviceID ? "'" + GQLDeviceID + "'" : null};
                     AuthorizationHeader = ${AuthorizationHeader ? "'" + AuthorizationHeader + "'" : undefined};
@@ -629,6 +634,14 @@
                 let parsedRequestUrl;
                 try { parsedRequestUrl = new URL(url); } catch { return realFetch(input, options); }
                 const fetchInput = target => input instanceof Request ? new Request(target, input) : target;
+                if (BlockClientSideAds && isClientSideAdRequestUrl(parsedRequestUrl)) {
+                    // Fail it the way a network filter would, so the player treats it as no ad.
+                    self.__tasBlockedCsaiRequests = (self.__tasBlockedCsaiRequests || 0) + 1;
+                    if (self.__tasBlockedCsaiRequests === 1 || self.__tasBlockedCsaiRequests % 10 === 0) {
+                        console.log('[AD DEBUG] Blocked client-side ad request in player worker (' + parsedRequestUrl.hostname + ') — total: ' + self.__tasBlockedCsaiRequests);
+                    }
+                    throw new TypeError('Failed to fetch');
+                }
                 if (AdSegmentCache.has(url)) {
                     return new Response(BLANK_MP4);
                 }
@@ -639,7 +652,16 @@
                     return new Promise(function(resolve, reject) {
                         const processAfter = async function(response) {
                             if (response.status === 200) {
-                                resolve(new Response(await processM3U8(url, resolvePlaylistUrls(await response.text(), response.url || url), realFetch, requestId, requestedStream)));
+                                let playlist = await processM3U8(url, resolvePlaylistUrls(await response.text(), response.url || url), realFetch, requestId, requestedStream);
+                                if (BlockClientSideAds) {
+                                    const stripped = stripClientSideAdMarkers(playlist);
+                                    if (stripped !== playlist && !self.__tasLoggedMafStrip) {
+                                        self.__tasLoggedMafStrip = true;
+                                        console.log('[AD DEBUG] Removed twitch-maf-ad marker (client-side ad cue) from playlist — segments unchanged, no backup switch');
+                                    }
+                                    playlist = stripped;
+                                }
+                                resolve(new Response(playlist));
                             } else {
                                 resolve(response);
                             }
@@ -827,6 +849,26 @@
             return newServerTime ? encodingsM3u8.replace(/(#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE=")[^"]+(")/, `$1${newServerTime}$2`) : encodingsM3u8;
         }
         return newServerTime ? encodingsM3u8.replace(/(SERVER-TIME=")[0-9.]+"/, `SERVER-TIME="${newServerTime}"`) : encodingsM3u8;
+    }
+    // Client-side (CSAI) ad requests. The whole host is ad-only, so match by host rather than
+    // by path: a path list would silently stop matching when Twitch adds a new ad endpoint.
+    // Serialized into the worker — no outer-scope references.
+    function isClientSideAdRequestUrl(url) {
+        try {
+            const parsed = url instanceof URL ? url : new URL(String(url), 'https://www.twitch.tv/');
+            return parsed.protocol === 'https:' && (parsed.hostname === 'edge.ads.twitch.tv' || parsed.hostname === 'vaes.amazon-adsystem.com');
+        } catch {
+            return false;
+        }
+    }
+    // Twitch cues a client-side ad with #EXT-X-DATERANGE:ID="maf-ad-...",CLASS="twitch-maf-ad",...
+    // while every segment stays live (GosuDRM/TTV-AB#98: the separate ad video followed the
+    // marker 2-8s later in 13 of 15 observed events). Drop just that tag so the player is not
+    // cued; the segments are untouched, so this never switches to a backup stream.
+    // Serialized into the worker — no outer-scope references.
+    function stripClientSideAdMarkers(textStr) {
+        if (typeof textStr !== 'string' || textStr.indexOf('twitch-maf-ad') === -1) return textStr;
+        return textStr.split('\n').filter(line => !(line.startsWith('#EXT-X-DATERANGE:') && line.includes('CLASS="twitch-maf-ad"'))).join('\n');
     }
     function hasAdTags(textStr) {
         return AdSignifiers.some((s) => s && textStr.includes(s));
@@ -3394,9 +3436,14 @@
                         }
                     }
                 }
-                if (requestUrl.includes('edge.ads.twitch.tv')) {
+                if (requestUrl.includes('edge.ads.twitch.tv') || requestUrl.includes('amazon-adsystem.com')) {
                     const csaiType = requestUrl.includes('bp=midroll') ? 'midroll' : requestUrl.includes('bp=preroll') ? 'preroll' : 'unknown';
-                    countCsaiRequest(csaiType, 'fetch');
+                    const blockCsai = BlockClientSideAds && isClientSideAdRequestUrl(requestUrl);
+                    countCsaiRequest(csaiType, 'fetch', blockCsai);
+                    if (blockCsai) {
+                        // Fail it the way a network filter would, so the player treats it as no ad.
+                        return Promise.reject(new TypeError('Failed to fetch'));
+                    }
                 }
             }
             return realFetch.apply(this, arguments);
@@ -3545,6 +3592,7 @@
             ['earlyReloadPollThreshold', 'Early reload poll threshold', 3, [0, 100, 1], '0 disables early reloads. A thin recovery cache can trigger sooner.']
         ];
         if (script === 'vaft') definitions.push(
+            ['blockClientSideAds', 'Block client-side ads', true, 'boolean', 'Fails Twitch ad-server requests and removes the playlist cue for separate ad videos. Turn off if streams misbehave.'],
             ['pageRefreshFallback', 'Refresh the page if player recovery fails', false, 'boolean', 'Last resort after two failed player resets and another 3 seconds without progress. At most once every 5 minutes per tab. May trigger another ad and interrupt chat.'],
             ['driftCorrectionRate', 'Catch-up playback speed', 1.1, [0, 2, 0.05], '0 disables catch-up.'],
             ['preferLowQualityBackup', 'Allow low-quality backup recovery', true, 'boolean'],
@@ -3887,7 +3935,7 @@
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.40');
+        initializeTASControls('vaft', '68.5.41');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
@@ -4010,6 +4058,11 @@
             RecoverFromSilentMute = false;
             console.log('[AD DEBUG] RecoverFromSilentMute disabled via localStorage — hard-reload backstop respects already-muted state, mid-session manual mutes preserved across reloads');
         }
+        const lsBlockClientSideAds = localStorage.getItem('twitchAdSolutions_blockClientSideAds');
+        if (lsBlockClientSideAds === 'false') {
+            BlockClientSideAds = false;
+            console.log('[AD DEBUG] Client-side ad blocking DISABLED via localStorage — edge.ads.twitch.tv requests and twitch-maf-ad markers pass through');
+        }
         const lsDisablePostBreakWedge = localStorage.getItem('twitchAdSolutions_disablePostBreakWedge');
         if (lsDisablePostBreakWedge === 'true') {
             DisablePostBreakWedge = true;
@@ -4029,13 +4082,33 @@
     document.addEventListener('play', onMediaEventForSeparateVideoAds, true);
     // Hook XHR to detect CSAI ad requests that bypass fetch
     const realXHROpen = XMLHttpRequest.prototype.open;
+    const realXHRSend = XMLHttpRequest.prototype.send;
+    const blockedCsaiXhrs = new WeakSet();
     XMLHttpRequest.prototype.open = maskAsNative(function(method, url) {
-        if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
-            const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
-            countCsaiRequest(csaiType, 'xhr');
+        blockedCsaiXhrs.delete(this);
+        const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.href : '';
+        if (urlStr.includes('edge.ads.twitch.tv') || urlStr.includes('amazon-adsystem.com')) {
+            const csaiType = urlStr.includes('bp=midroll') ? 'midroll' : urlStr.includes('bp=preroll') ? 'preroll' : 'unknown';
+            const blockCsai = BlockClientSideAds && isClientSideAdRequestUrl(urlStr);
+            countCsaiRequest(csaiType, 'xhr', blockCsai);
+            if (blockCsai) blockedCsaiXhrs.add(this);
         }
         return realXHROpen.apply(this, arguments);
     }, 'open');
+    XMLHttpRequest.prototype.send = maskAsNative(function() {
+        if (blockedCsaiXhrs.has(this)) {
+            // Report a network failure, as a blocked request would, instead of sending it.
+            const xhr = this;
+            setTimeout(function() {
+                try {
+                    xhr.dispatchEvent(new ProgressEvent('error'));
+                    xhr.dispatchEvent(new ProgressEvent('loadend'));
+                } catch {}
+            }, 0);
+            return;
+        }
+        return realXHRSend.apply(this, arguments);
+    }, 'send');
     if (PlayerBufferingFix) {
         monitorPlayerBuffering();
     }

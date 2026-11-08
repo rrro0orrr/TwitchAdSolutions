@@ -105,6 +105,7 @@ localStorage.removeItem('twitchAdSolutions_hideAdOverlay');
 | `disableReloadCap` | Unset; vaft only | Set to `true` to allow repeated buffer-monitor reloads. This can cause reload loops. |
 | `preferLowQualityBackup` | `true`; vaft only | Allow the 360p autoplay fallback, including recovery from stalled ad stripping. Set to `false` to disable both. |
 | `backupSwapFirst` | `true`; vaft only | Try backup streams first. Set to `false` to strip ad segments first. |
+| `blockClientSideAds` | `true`; vaft only | Block Twitch's client-side ads: fail requests to its ad servers and remove the playlist cue for the separate ad video. Set to `false` if streams misbehave. |
 
 During an autoplay backup, Twitch's quality menu can still show Source while playback is at 360p. Vaft attempts to restore full quality when the break ends.
 
