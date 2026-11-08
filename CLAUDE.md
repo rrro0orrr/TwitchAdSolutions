@@ -4,7 +4,7 @@ Fork of ryanbr/TwitchAdSolutions, originally based on pixeltris/TwitchAdSolution
 
 ## Worker Blob Serialization (CRITICAL)
 
-Functions serialized via `.toString()` into the Web Worker blob CANNOT reference outer-scope variables. This includes: `processM3U8`, `stripAdSegments`, `resolvePlaylistUrls`, `hookWorkerFetch`, `getAccessToken`, `gqlRequest`, `hasAdTags`, `getMatchedAdSignifiers`, `notifyAdComplete`, `getStreamUrlForResolution`, `parseAttributes`, `getServerTimeFromM3u8`, `replaceServerTimeInM3u8`, `pruneStreamInfos`, `createStreamInfo`, `getWasmWorkerJs`, `videoCodecFamily`, `resetAdEndTracking`, `triggerEarlyReloadIfNeeded`.
+Functions serialized via `.toString()` into the Web Worker blob CANNOT reference outer-scope variables. This includes: `processM3U8`, `stripAdSegments`, `resolvePlaylistUrls`, `hookWorkerFetch`, `getAccessToken`, `gqlRequest`, `hasAdTags`, `getMatchedAdSignifiers`, `notifyAdComplete`, `getStreamUrlForResolution`, `parseAttributes`, `getServerTimeFromM3u8`, `replaceServerTimeInM3u8`, `pruneStreamInfos`, `createStreamInfo`, `getWasmWorkerJs`, `videoCodecFamily`, `resetAdEndTracking`, `triggerEarlyReloadIfNeeded`, `isClientSideAdRequestUrl`, `stripClientSideAdMarkers`.
 
 - Declare variables in `declareOptions()` (also serialized) or in the inline blob template literal
 - To pass window-scope values to the worker, inject after `declareOptions(self)`: e.g. `ReloadPlayerAfterAd = ${ReloadPlayerAfterAd};`
@@ -30,7 +30,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.40/125, video-swap-new 1.94/62, strip 1.12/29.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.41/126, video-swap-new 1.94/62, strip 1.12/29.
 
 ## localStorage Config
 
@@ -48,6 +48,7 @@ All read at init, injected into worker blob:
 - `twitchAdSolutions_fastAutoplayFirstTry` — opt-out (default `true` as of v67.1.0). Prepend autoplay (360p) to position 0 of the iteration when the prior break committed autoplay via PreferLowQualityBackup escape hatch. Saves ~1.5-2s of probe-loop buffering. Auto-resets when a Source-tier type wins (channel recovered) so quality returns to full automatically. Set to `'false'` to force full Source-tier probe on every break (vaft only)
 - `twitchAdSolutions_recoverFromSilentMute` — opt-out (default `true`). On hard reload, if the element is already muted but vaft has successfully unmuted at any point earlier this session, recover via the 5500ms backstop (Twitch's silent re-mute pattern — issue #200). Disable via `'false'` if you deliberately mute mid-session and want that preserved across reloads. Users muted from session start are always respected (vaftEverUnmuted=false short-circuits the recovery check). vaft only.
 - `twitchAdSolutions_disableAdSpoofing` — opt-in via `'false'` (default `'true'` — spoofing is OFF). When enabled, on ad detect vaft fires the GQL ad-tracking beacons (`video_ad_impression`, `video_ad_quartile_complete` × 4, `video_ad_pod_complete`) that Twitch's player would have sent if the ad had played normally. Originally intended to mimic the ad-completion signal Twitch expects and may reduce detection escalation — but the always-100%-watched + audible + visible beacon pattern may itself fingerprint as anomalous (silently, without GQL rejection) and trigger detection escalation in the other direction (observed correlation with CSAI ads reaching committed backups + TTV-AB maintainer hypothesis). Default flipped from on→off after v68.2.0. Set to `'false'` to re-enable (for A/B testing whether spoofing affects ad break duration / CSAI escalation on your channels). Failures swallowed (never blocks ad-block flow). vaft only.
+- `twitchAdSolutions_blockClientSideAds` — opt-out via `'false'` (default on), vaft only. Fails page and worker requests to `edge.ads.twitch.tv` / `vaes.amazon-adsystem.com` and strips the `CLASS="twitch-maf-ad"` DATERANGE from served playlists without switching to a backup.
 - `twitchAdSolutions_disablePostBreakWedge` — opt-out via `'true'` (default off = feature on). Disables the post-break video-wedge recovery (v667/v68.5.0, TTV-AB _checkPostBreakWedge mirror) for A/B isolation.
 
 - `twitchAdSolutions_pageRefreshFallback` -- opt-in via `true`, vaft only. After two timed-out recovery attempts and 3 additional stalled seconds, refresh the document if the same video/route remains live and unpaused. Session storage timestamp `twitchAdSolutions_lastPageRefreshAt` limits it to once every 5 minutes per tab; fail closed on unavailable storage. Never trigger from success, exception, cancellation or unavailable-player outcomes.
@@ -55,7 +56,7 @@ All read at init, injected into worker blob:
 ## CSAI vs SSAI
 
 - **SSAI** (Server-Side Ad Insertion) — ads embedded in m3u8 segments. Blockable by stripping.
-- **CSAI** (Client-Side Ad Insertion) — ads delivered via `edge.ads.twitch.tv`, outside m3u8. Not blockable at m3u8 level. Detected via fetch/XHR hooks for logging only.
+- **CSAI** (Client-Side Ad Insertion) — ads delivered via `edge.ads.twitch.tv`, outside m3u8, cued by a `#EXT-X-DATERANGE:ID="maf-ad-...",CLASS="twitch-maf-ad"` tag while segments stay live. vaft (68.5.41+) fails the ad-server requests and strips that tag (`blockClientSideAds`). Do not treat the tag as an ad break: that would switch to a 360p backup for up to a minute even when no ad plays.
 - When `hadStrippedSegments === false` (CSAI-only), skip reload entirely to prevent cascade.
 
 ## Key Architecture (vaft)
