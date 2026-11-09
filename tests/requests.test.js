@@ -66,12 +66,19 @@ for (const file of mainFiles) {
         context.hookFetch();
         const other = { operationName: 'OtherOperation', variables: { playerType: 'keep-me' } };
         await window.fetch('https://gql.twitch.tv/gql', { method: 'POST', body: JSON.stringify([
-            { operationName: 'PlaybackAccessToken', variables: { playerType: 'picture-by-picture' } }, other
+            { operationName: 'PlaybackAccessToken', variables: { playerType: 'picture-by-picture' } }, other,
+            { operationName: 'PlaybackAccessToken', variables: { playerType: 'site' } }
         ]) });
         assert.notEqual(calls[0][1].body, '', 'entire GraphQL batch erased');
         const body = JSON.parse(calls[0][1].body);
         assert.deepEqual(body[1], other);
-        assert.notEqual(body[0].variables.playerType, 'picture-by-picture');
+        assert.notEqual(body[2].variables.playerType, 'site', 'other token requests are still forced');
+        if (file.startsWith('vaft/')) {
+            // vaft 68.5.42: Twitch's picture-by-picture player keeps its own (ad-free) token type.
+            assert.equal(body[0].variables.playerType, 'picture-by-picture', 'picture-by-picture token must keep its own type');
+        } else {
+            assert.notEqual(body[0].variables.playerType, 'picture-by-picture');
+        }
     });
 
     test('synthetic resilience: unrelated host cannot overwrite GQL headers in ' + file, async () => {

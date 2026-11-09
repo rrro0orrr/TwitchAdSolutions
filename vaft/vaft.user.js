@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      68.5.41
+// @version      68.5.42
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 126;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 127;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'userscript';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -2312,6 +2312,15 @@
     function monitorPlayerBuffering() {
         clearTimeout(monitorPlayerBuffering.timeoutId);
         let rescheduleDelay = PlayerBufferingDelay;
+        // Start of the first buffered range beginning ahead of `position` (a hole the playhead
+        // cannot cross on its own), or null. Nested so it travels with this function.
+        function findBufferedGapAhead(video, position) {
+            for (let i = 0; i < video.buffered.length; i++) {
+                const start = video.buffered.start(i);
+                if (start > position + 0.25) return start;
+            }
+            return null;
+        }
         try {
         // Fresh player lookup every tick (avoids stale ref when Twitch restarts its own player)
         playerForMonitoringBuffering = null;
@@ -2494,16 +2503,17 @@
                 playerBufferState.gapJumpStuckTicks++;
             }
             playerBufferState.gapJumpLastPosition = video && !video.paused && !video.ended ? position : -1;
-            if (video && !video.paused && !video.ended && playerBufferState.gapJumpStuckTicks >= 3 && video.readyState < 3 && video.buffered.length > 1) {
-                for (let i = 0; i < video.buffered.length; i++) {
-                    const gapStart = video.buffered.start(i);
-                    if (gapStart > position + 0.25) {
-                        console.log('[AD DEBUG] In-ad buffer-gap seek: ' + position.toFixed(1) + 's to ' + gapStart.toFixed(1) + 's');
-                        video.currentTime = gapStart + 0.05;
-                        playerBufferState.gapJumpStuckTicks = 0;
-                        playerBufferState.gapJumpLastPosition = -1;
-                        break;
-                    }
+            // Two frozen intervals (~1.2s at the visible 600ms cadence). Three (~1.8-2.4s) raced the
+            // frozen-backup check below, whose 3s hard reload sometimes won — a long freeze plus a
+            // player restart for a hole a seek clears instantly. Mirrors GosuDRM/TTV-AB 26.0.2
+            // ("skip a gap ... after about a second of frozen video during an ad break").
+            if (video && !video.paused && !video.ended && playerBufferState.gapJumpStuckTicks >= 2 && video.readyState < 3 && video.buffered.length > 1) {
+                const gapStart = findBufferedGapAhead(video, position);
+                if (gapStart !== null) {
+                    console.log('[AD DEBUG] In-ad buffer-gap seek: ' + position.toFixed(1) + 's to ' + gapStart.toFixed(1) + 's');
+                    video.currentTime = gapStart + 0.05;
+                    playerBufferState.gapJumpStuckTicks = 0;
+                    playerBufferState.gapJumpLastPosition = -1;
                 }
             }
         } else {
@@ -2632,6 +2642,7 @@
                 else if (advanced) {
                     watch.hasPlayed = true;
                     watch.channelHasPlayed = true;
+                    watch.gapSeekUsed = false;
                     if (!recentReload && !doTwitchPlayerTask.recovery) watch.reloadUsed = false;
                 }
                 if (advanced || reset || !watch.hasPlayed || (!playerBufferState.inAdBreak && !postBreakWatch)
@@ -2650,7 +2661,22 @@
                             }
                         }
                         const stallThreshold = video.readyState <= 2 && bufferedAhead <= 0.1 ? 3000 : 8000;
-                        if (now - watch.stalledAt >= stallThreshold) {
+                        // A buffered range just ahead means the freeze is a hole left by a stream
+                        // switch, not a dead feed: seek over it instead of restarting the player
+                        // (a restart is slow, refetches a token and can start a new ad). Covers
+                        // hidden tabs, where the gap check above runs 3x slower, and the post-break
+                        // window it does not watch. With no gap ahead, the reload still runs.
+                        // One seek per frozen run: if playback is still frozen after it, the
+                        // reload follows. The seek itself is not progress (watch.position is set
+                        // to the seek target below), so only real playback re-arms it.
+                        const gapAhead = video.readyState < 3 && !watch.gapSeekUsed ? findBufferedGapAhead(video, video.currentTime) : null;
+                        if (now - watch.stalledAt >= Math.min(stallThreshold, 1500) && gapAhead !== null) {
+                            watch.gapSeekUsed = true;
+                            console.log('[AD DEBUG] ' + (postBreakWatch ? 'Post-ad' : 'Ad backup') + ' playhead frozen for ' + ((now - watch.stalledAt) / 1000).toFixed(1)
+                                + 's at a buffered gap — seeking ' + video.currentTime.toFixed(1) + 's to ' + gapAhead.toFixed(1) + 's instead of reloading');
+                            video.currentTime = gapAhead + 0.05;
+                            watch.stalledAt = 0;
+                        } else if (now - watch.stalledAt >= stallThreshold) {
                             console.log('[AD DEBUG] ' + (postBreakWatch ? 'Post-ad' : 'Ad backup') + ' playhead frozen for ' + ((now - watch.stalledAt) / 1000).toFixed(1)
                                 + 's (readyState=' + video.readyState + ', networkState=' + video.networkState
                                 + ', bufferedRanges=' + video.buffered.length + ', stripping=' + isActivelyStrippingAds + ') - hard reload');
@@ -3417,15 +3443,23 @@
                     if (ForceAccessTokenPlayerType && typeof init?.body === 'string' && init.body.includes('PlaybackAccessToken')) {
                         let replacedPlayerType = '';
                         const newBody = JSON.parse(init.body);
+                        // Twitch opens a small picture-by-picture player during ad breaks so the stream
+                        // keeps playing beside the ad. Its own token type carries no ads; forcing it to
+                        // ForceAccessTokenPlayerType handed that box a full, ad-laden stream (the main
+                        // stream's ad markers, a second 1080p load) and stopped the worker's
+                        // '!url.includes("picture-by-picture")' master skip from recognising it.
+                        // Leave it on its own token. Mirrors GosuDRM/TTV-AB 26.0.3.
+                        const shouldForcePlayerType = op => op?.operationName?.includes('PlaybackAccessToken') && op?.variables?.playerType
+                            && op.variables.playerType !== ForceAccessTokenPlayerType && op.variables.playerType !== 'picture-by-picture';
                         if (Array.isArray(newBody)) {
                             for (let i = 0; i < newBody.length; i++) {
-                                if (newBody[i]?.operationName?.includes('PlaybackAccessToken') && newBody[i]?.variables?.playerType && newBody[i]?.variables?.playerType !== ForceAccessTokenPlayerType) {
+                                if (shouldForcePlayerType(newBody[i])) {
                                     replacedPlayerType = newBody[i].variables.playerType;
                                     newBody[i].variables.playerType = ForceAccessTokenPlayerType;
                                 }
                             }
                         } else {
-                            if (newBody?.operationName?.includes('PlaybackAccessToken') && newBody?.variables?.playerType && newBody?.variables?.playerType !== ForceAccessTokenPlayerType) {
+                            if (shouldForcePlayerType(newBody)) {
                                 replacedPlayerType = newBody.variables.playerType;
                                 newBody.variables.playerType = ForceAccessTokenPlayerType;
                             }
@@ -3935,7 +3969,7 @@
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.41');
+        initializeTASControls('vaft', '68.5.42');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
