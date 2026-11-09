@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      68.5.41
+// @version      68.5.42
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 126;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 127;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'userscript';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -3417,15 +3417,23 @@
                     if (ForceAccessTokenPlayerType && typeof init?.body === 'string' && init.body.includes('PlaybackAccessToken')) {
                         let replacedPlayerType = '';
                         const newBody = JSON.parse(init.body);
+                        // Twitch opens a small picture-by-picture player during ad breaks so the stream
+                        // keeps playing beside the ad. Its own token type carries no ads; forcing it to
+                        // ForceAccessTokenPlayerType handed that box a full, ad-laden stream (the main
+                        // stream's ad markers, a second 1080p load) and stopped the worker's
+                        // '!url.includes("picture-by-picture")' master skip from recognising it.
+                        // Leave it on its own token. Mirrors GosuDRM/TTV-AB 26.0.3.
+                        const shouldForcePlayerType = op => op?.operationName?.includes('PlaybackAccessToken') && op?.variables?.playerType
+                            && op.variables.playerType !== ForceAccessTokenPlayerType && op.variables.playerType !== 'picture-by-picture';
                         if (Array.isArray(newBody)) {
                             for (let i = 0; i < newBody.length; i++) {
-                                if (newBody[i]?.operationName?.includes('PlaybackAccessToken') && newBody[i]?.variables?.playerType && newBody[i]?.variables?.playerType !== ForceAccessTokenPlayerType) {
+                                if (shouldForcePlayerType(newBody[i])) {
                                     replacedPlayerType = newBody[i].variables.playerType;
                                     newBody[i].variables.playerType = ForceAccessTokenPlayerType;
                                 }
                             }
                         } else {
-                            if (newBody?.operationName?.includes('PlaybackAccessToken') && newBody?.variables?.playerType && newBody?.variables?.playerType !== ForceAccessTokenPlayerType) {
+                            if (shouldForcePlayerType(newBody)) {
                                 replacedPlayerType = newBody.variables.playerType;
                                 newBody.variables.playerType = ForceAccessTokenPlayerType;
                             }
@@ -3935,7 +3943,7 @@
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.41');
+        initializeTASControls('vaft', '68.5.42');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
