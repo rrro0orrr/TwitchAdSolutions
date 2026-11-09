@@ -746,8 +746,8 @@ async function testPlaybackRegressions() {
         const gapContext = playbackContext(source);
         vm.runInContext(scriptFunction(source, 'monitorPlayerBuffering'), gapContext);
         gapContext.playerBufferState.inAdBreak = true;
-        for (let tick = 0; tick < 3; tick++) gapContext.monitorPlayerBuffering();
-        assertEq(gapContext.video.currentTime, 10, label + 'buffer-gap seek waits for three frozen intervals');
+        for (let tick = 0; tick < 2; tick++) gapContext.monitorPlayerBuffering();
+        assertEq(gapContext.video.currentTime, 10, label + 'buffer-gap seek waits for two frozen intervals');
         gapContext.monitorPlayerBuffering();
         assertEq(gapContext.video.currentTime, 40.05, label + 'frozen live stream seeks into the next buffered range');
         gapContext.video.currentTime = 10;
