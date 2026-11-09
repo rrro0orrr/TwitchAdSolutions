@@ -2578,6 +2578,7 @@ twitch-videoad.js text/javascript
                 else if (advanced) {
                     watch.hasPlayed = true;
                     watch.channelHasPlayed = true;
+                    watch.gapSeekUsed = false;
                     if (!recentReload && !doTwitchPlayerTask.recovery) watch.reloadUsed = false;
                 }
                 if (advanced || reset || !watch.hasPlayed || (!playerBufferState.inAdBreak && !postBreakWatch)
@@ -2601,8 +2602,12 @@ twitch-videoad.js text/javascript
                         // (a restart is slow, refetches a token and can start a new ad). Covers
                         // hidden tabs, where the gap check above runs 3x slower, and the post-break
                         // window it does not watch. With no gap ahead, the reload still runs.
-                        const gapAhead = video.readyState < 3 ? findBufferedGapAhead(video, video.currentTime) : null;
+                        // One seek per frozen run: if playback is still frozen after it, the
+                        // reload follows. The seek itself is not progress (watch.position is set
+                        // to the seek target below), so only real playback re-arms it.
+                        const gapAhead = video.readyState < 3 && !watch.gapSeekUsed ? findBufferedGapAhead(video, video.currentTime) : null;
                         if (now - watch.stalledAt >= Math.min(stallThreshold, 1500) && gapAhead !== null) {
+                            watch.gapSeekUsed = true;
                             console.log('[AD DEBUG] ' + (postBreakWatch ? 'Post-ad' : 'Ad backup') + ' playhead frozen for ' + ((now - watch.stalledAt) / 1000).toFixed(1)
                                 + 's at a buffered gap — seeking ' + video.currentTime.toFixed(1) + 's to ' + gapAhead.toFixed(1) + 's instead of reloading');
                             video.currentTime = gapAhead + 0.05;

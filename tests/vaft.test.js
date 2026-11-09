@@ -286,6 +286,20 @@ for (const file of files) {
             video.buffered = layout === 'empty' ? { length: 0 } : layout === 'gap'
                 ? { length: 1, start: () => video.currentTime + 5, end: () => video.currentTime + 15 }
                 : { length: 1, start: () => 0, end: () => video.currentTime + 0.001 };
+            if (layout === 'gap') {
+                // A buffered range ahead: seek over the hole once instead of reloading. This fixture
+                // keeps the range ahead of the playhead, so it stays frozen and the reload must follow.
+                const frozenAt = video.currentTime;
+                h.advance(3000);
+                assert.equal(h.reloads.length, 0, 'a buffered gap ahead must be seeked, not reloaded');
+                assert.ok(video.currentTime >= frozenAt + 5, 'frozen playhead did not seek over the buffered gap');
+                const seekedTo = video.currentTime;
+                h.advance(4200);
+                assert.equal(video.currentTime, seekedTo, 'only one gap seek per frozen run');
+                assert.equal(h.reloads.length, 1, 'still frozen after the gap seek: hard reload must follow');
+                h.context.doTwitchPlayerTask.recovery.cancel();
+                return;
+            }
             h.advance(3000);
             assert.equal(h.reloads.length, 0, 'must allow the full three-second observation window');
             h.advance(1200);
