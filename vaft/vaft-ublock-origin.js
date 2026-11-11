@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 127;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 128;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'uBlock Origin';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -498,6 +498,7 @@ twitch-videoad.js text/javascript
                             }
                         }
                         playerBufferState.inAdBreak = !!e.data.hasAds;
+                        playerBufferState.activeBackupPlayerType = e.data.hasAds ? (e.data.activeBackupPlayerType || null) : null;
                         // Clear drift catch-up when ads start — don't run 1.1x during ad handling
                         if (e.data.hasAds && (driftCatchUpInterval || driftCatchUpTimeout)) {
                             stopDriftCorrection();
@@ -2167,6 +2168,9 @@ twitch-videoad.js text/javascript
         isLive: true,
         lastBackupSwitchAt: 0,
         lastReloadAt: 0,
+        activeBackupPlayerType: null,
+        recoveryFailedAt: 0,
+        failedRecoveryRetries: 0,
         recoveryReloadUsed: false,
         userPauseIntent: false,
         pauseIntentVideo: null,
@@ -2571,7 +2575,10 @@ twitch-videoad.js text/javascript
                 watch.inAdBreak = !!playerBufferState.inAdBreak;
                 const postBreakWatch = !watch.inAdBreak && now < watch.postBreakUntil;
                 const recentReload = playerBufferState.lastReloadAt && now - playerBufferState.lastReloadAt < 15000;
-                const recentSwitch = playerBufferState.lastBackupSwitchAt && now - playerBufferState.lastBackupSwitchAt < 10000;
+                // The 360p autoplay backup is a resolution change inside the running player. When it
+                // freezes there it does not recover by itself, so do not wait out the switch grace.
+                const autoplayBackup = watch.inAdBreak && playerBufferState.activeBackupPlayerType === 'autoplay';
+                const recentSwitch = !autoplayBackup && playerBufferState.lastBackupSwitchAt && now - playerBufferState.lastBackupSwitchAt < 10000;
                 const advanced = video.currentTime > watch.position + 0.05;
                 const reset = video.seeking || video.currentTime < watch.position;
                 if (reset) watch.hasPlayed = false;
@@ -2579,7 +2586,31 @@ twitch-videoad.js text/javascript
                     watch.hasPlayed = true;
                     watch.channelHasPlayed = true;
                     watch.gapSeekUsed = false;
-                    if (!recentReload && !doTwitchPlayerTask.recovery) watch.reloadUsed = false;
+                    playerBufferState.recoveryFailedAt = 0;
+                    if (!recentReload && !doTwitchPlayerTask.recovery) {
+                        watch.reloadUsed = false;
+                        playerBufferState.failedRecoveryRetries = 0;
+                    }
+                }
+                // Recovery gave up (both attempts timed out) while the break was still running.
+                // Nothing else restarts a frozen or script-paused player until the break ends, so
+                // retry after 10 seconds without progress, at most twice per frozen run.
+                if (playerBufferState.recoveryFailedAt && !advanced && !doTwitchPlayerTask.recovery
+                    && now - playerBufferState.recoveryFailedAt >= 10000) {
+                    playerBufferState.recoveryFailedAt = 0;
+                    if ((playerBufferState.inAdBreak || postBreakWatch) && !video.ended
+                        && !playerBufferState.userPauseIntent && !document.pictureInPictureElement
+                        && playerBufferState.failedRecoveryRetries < 2) {
+                        playerBufferState.failedRecoveryRetries++;
+                        const paused = monitored.player.isPaused();
+                        console.log('[AD DEBUG] Player still ' + (paused ? 'paused' : 'frozen') + ' 10s after recovery stopped (readyState=' + video.readyState
+                            + ') - retry ' + playerBufferState.failedRecoveryRetries + '/2');
+                        // The recovery paused this player, not the user: allow the resume.
+                        if (paused) playerBufferState.weJustPaused = Date.now();
+                        watch.reloadUsed = true;
+                        watch.stalledAt = 0;
+                        doTwitchPlayerTask(false, true, 'early');
+                    }
                 }
                 if (advanced || reset || !watch.hasPlayed || (!playerBufferState.inAdBreak && !postBreakWatch)
                     || video.ended || monitored.player.isPaused()
@@ -3130,7 +3161,12 @@ twitch-videoad.js text/javascript
                 if (doTwitchPlayerTask.recovery === request) doTwitchPlayerTask.recovery = null;
                 recordTASDiagnostic({ event: 'recovery-finished', success, reason: success ? 'progress' : reason, attempt });
                 resolveRecovery(success);
-                if (!success && reason === 'timeout' && attempt >= 2) schedulePageRefreshFallback(request);
+                if (success) playerBufferState.recoveryFailedAt = 0;
+                if (!success && reason === 'timeout' && attempt >= 2) {
+                    // Lets the ad-backup stall watch retry once the player has had time to settle.
+                    playerBufferState.recoveryFailedAt = Date.now();
+                    schedulePageRefreshFallback(request);
+                }
             };
             request.isCurrent = isCurrent;
             request.cancel = () => finish(false);
@@ -3900,7 +3936,7 @@ twitch-videoad.js text/javascript
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.42');
+        initializeTASControls('vaft', '68.5.43');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }

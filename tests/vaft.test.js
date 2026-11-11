@@ -399,7 +399,12 @@ for (const file of files) {
             h.advance(15000);
             replace();
             h.advance(60000);
-            assert.equal(h.reloads.length, 2, 'replacement re-armed an exhausted recovery');
+            // vaft 68.5.43: after both attempts time out, up to two more recoveries run 10 s apart.
+            const settled = h.reloads.length;
+            assert.ok(settled > 2 && settled <= 6, 'retries after a failed recovery are bounded: ' + settled);
+            replace();
+            h.advance(120000);
+            assert.equal(h.reloads.length, settled, 'replacement re-armed an exhausted recovery');
         });
     }
 
@@ -438,7 +443,10 @@ for (const file of files) {
         h.advance(15000);
         assert.equal(h.reloads.length, 1, 'post-ad depleted freeze never requested recovery');
         h.advance(60000);
-        assert.equal(h.reloads.length, 2, 'only one bounded recovery runs for a frozen post-ad video');
+        const settled = h.reloads.length;
+        assert.ok(settled > 2 && settled <= 6, 'retries after a failed post-ad recovery are bounded: ' + settled);
+        h.advance(120000);
+        assert.equal(h.reloads.length, settled, 'recovery stops after the bounded retries');
     });
 
     test('synthetic resilience: ' + file + ' post-ad freeze watch respects pause, seek, progress and navigation', () => {
@@ -471,8 +479,13 @@ for (const file of files) {
             assert.equal(h.reloads.length, 1, 'frozen playhead triggers recovery, readyState=' + readyState);
             assert.equal(h.reloads[0].isNewMediaPlayerInstance, true);
             assert.equal(h.reloads[0].refreshAccessToken, true);
-            h.advance(30000);
-            assert.equal(h.reloads.length, 2, 'only the bounded recovery retries the same frozen video');
+            h.advance(13000);
+            assert.equal(h.reloads.length, 2, 'the first recovery stops after two attempts');
+            assert.equal(await h.context.doTwitchPlayerTask.latestRecovery.promise, false);
+            h.advance(8000);
+            assert.equal(h.reloads.length, 2, 'no retry before 10 s without progress');
+            h.advance(120000);
+            assert.equal(h.reloads.length, 6, 'two bounded retries after the failed recovery, then stop');
             assert.equal(await h.context.doTwitchPlayerTask.latestRecovery.promise, false);
         }
     });
@@ -488,6 +501,44 @@ for (const file of files) {
             assert.equal(h.reloads.length, 1, field);
             h.context.doTwitchPlayerTask.recovery.cancel();
         }
+    });
+
+    test('synthetic resilience: ' + file + ' does not wait out the switch grace for a frozen autoplay backup', () => {
+        // User log (68.5.42): the 360p autoplay backup froze right after it was committed in
+        // every break, and the reload only came 13 s later (10 s switch grace + 3 s stall).
+        for (const [backup, expected] of [['autoplay', 1], ['site', 0], [null, 0]]) {
+            const h = monitorHarness(file);
+            h.context.playerBufferState.inAdBreak = true;
+            h.context.playerBufferState.activeBackupPlayerType = backup;
+            h.context.playerBufferState.lastBackupSwitchAt = 100600;
+            h.current.player.video.readyState = 2;
+            h.current.player.video.buffered = { length: 0 };
+            h.advance(4200);
+            assert.equal(h.reloads.length, expected, 'backup=' + backup);
+            h.context.doTwitchPlayerTask.recovery?.cancel();
+        }
+    });
+
+    test('synthetic resilience: ' + file + ' resumes a player left paused after recovery gave up mid-break', async () => {
+        const h = monitorHarness(file);
+        h.context.playerBufferState.inAdBreak = true;
+        h.current.player.video.readyState = 2;
+        h.current.player.video.buffered = { length: 0 };
+        h.advance(4200);
+        assert.equal(h.reloads.length, 1);
+        h.advance(13000);
+        assert.equal(h.reloads.length, 2);
+        assert.equal(await h.context.doTwitchPlayerTask.latestRecovery.promise, false);
+        // Recovery left the player paused (not by the user): the retry resumes it.
+        let plays = 0;
+        h.current.player.isPaused = () => true;
+        h.current.player.video.paused = true;
+        h.current.player.play = () => { plays++; return Promise.resolve(); };
+        h.advance(11000);
+        assert.equal(plays, 1, 'paused player was not resumed after recovery stopped');
+        h.context.playerBufferState.userPauseIntent = true;
+        h.advance(60000);
+        assert.equal(plays, 1, 'a user pause is respected');
     });
 
     test('synthetic resilience: ' + file + ' re-arms ad stall recovery only after playback resumes beyond reload grace', () => {
