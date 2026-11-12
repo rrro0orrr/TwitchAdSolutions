@@ -541,6 +541,26 @@ for (const file of files) {
         assert.equal(plays, 1, 'a user pause is respected');
     });
 
+    test('synthetic resilience: ' + file + ' retries a failed recovery on a fresh stream session', () => {
+        const h = monitorHarness(file);
+        const sent = [];
+        h.context.postTwitchWorkerMessage = key => sent.push(key);
+        const discards = () => sent.filter(key => key === 'DiscardStreamSession').length;
+        h.context.playerBufferState.inAdBreak = true;
+        h.current.player.video.readyState = 2;
+        h.current.player.video.buffered = { length: 0 };
+        h.advance(4200);
+        h.advance(13000);
+        assert.equal(h.reloads.length, 2);
+        assert.equal(discards(), 0, 'the first recovery keeps the cached session');
+        h.advance(11000);
+        assert.equal(h.reloads.length, 3);
+        assert.equal(discards(), 1, 'the retry repeated the same reload on the cached session');
+        assert.ok(sent.indexOf('DiscardStreamSession') < sent.lastIndexOf('TriggeredPlayerReload'), 'requested before the reload');
+        h.advance(120000);
+        assert.equal(discards(), 2, 'one request per bounded retry');
+    });
+
     test('synthetic resilience: ' + file + ' re-arms ad stall recovery only after playback resumes beyond reload grace', () => {
         const h = monitorHarness(file);
         h.context.playerBufferState.inAdBreak = true;

@@ -39,6 +39,36 @@ for (const file of mainFiles.filter(file => file.startsWith('vaft'))) {
         assert.ok(result.includes('URI="https://cdn.invalid/redirected/audio/index.m3u8"'), 'unresolved audio group');
     });
 
+    test('synthetic resilience: failed recovery drops the cached stream session in ' + file, async () => {
+        const messages = [];
+        let session = 0;
+        const context = harness(file, { postMessage: message => messages.push(message), fetch: async url => {
+            if (String(url).includes('/channel/hls/')) {
+                session++;
+                return new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,CODECS="avc1.4d4028"\n'
+                    + 'https://cdn.invalid/session' + session + '/index.m3u8\n');
+            }
+            return new Response('#EXTM3U\n#EXTINF:2.0,live\nhttps://cdn.invalid/segment.ts\n');
+        } });
+        context.hookWorkerFetch();
+        const master = async () => (await context.fetch('https://usher.ttvnw.net/api/v2/channel/hls/fixture.m3u8')).text();
+        assert.ok((await master()).includes('/session1/'));
+        const first = context.StreamInfos.fixture;
+        first.IsShowingAd = true;
+        assert.ok((await master()).includes('/session1/'), 'an ordinary reload keeps the cached session');
+        assert.equal(context.StreamInfos.fixture, first);
+        context.DiscardStreamSessionUntil = Date.now() + 15000;
+        assert.ok((await master()).includes('/session3/'), 'the retry was handed the stale cached playlist');
+        assert.notEqual(context.StreamInfos.fixture, first);
+        assert.equal(context.StreamInfos.fixture.IsShowingAd, false);
+        assert.equal(context.DiscardStreamSessionUntil, 0, 'the request is used once');
+        const banner = messages.filter(message => message.key === 'UpdateAdBlockBanner').at(-1);
+        assert.equal(banner?.hasAds, false, 'the page was left in the dropped session\'s ad break');
+        assert.ok((await master()).includes('/session3/'), 'the new session is cached again');
+        context.DiscardStreamSessionUntil = Date.now() - 1;
+        assert.ok((await master()).includes('/session3/'), 'an expired request must not drop a session');
+    });
+
     test('synthetic resilience: drift stops on the original element after replacement in ' + file, () => {
         const callbacks = [], timers = new Map();
         const original = { playbackRate: 1.5 };

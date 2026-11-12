@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 128;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 129;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'uBlock Origin';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -102,6 +102,7 @@ twitch-videoad.js text/javascript
         scope.PlayerReloadMinimalRequestsTime = 1500;
         scope.PlayerReloadMinimalRequestsPlayerIndex = 2;//autoplay
         scope.HasTriggeredPlayerReload = false;
+        scope.DiscardStreamSessionUntil = 0;// Main thread asked for a fresh stream session on the next master request
         scope.ActiveStreamInfo = null;
         scope.MasterRequestSequence = 0;
         scope.StreamSessionSequence = 0;
@@ -433,6 +434,10 @@ twitch-videoad.js text/javascript
                             }
                         } else if (e.data.key == 'TriggeredPlayerReload') {
                             HasTriggeredPlayerReload = true;
+                        } else if (e.data.key == 'DiscardStreamSession') {
+                            // Recovery on the cached session timed out. Bounded so an unused request
+                            // cannot reset an unrelated later session.
+                            DiscardStreamSessionUntil = Date.now() + 15000;
                         } else if (e.data.key == 'ReloadSkipped') {
                             // Main thread refused the reload (player healthy) — clear the
                             // early-reload flags so we can re-fire if the player later stalls.
@@ -661,6 +666,16 @@ twitch-videoad.js text/javascript
                                 const serverTime = getServerTimeFromM3u8(encodingsM3u8);
                                 if (masterRequestId !== MasterRequestSequence) { resolve(new Response(encodingsM3u8)); return; }
                                 let streamInfo = StreamInfos[channelName];
+                                // A reloaded player is normally handed the cached master so it stays on the
+                                // session it already had. When reloads on that session keep timing out, the
+                                // retry asks for the playlist the new token just fetched instead.
+                                let droppedSession = false;
+                                if (streamInfo != null && streamInfo.EncodingsM3U8 != null && Date.now() < DiscardStreamSessionUntil) {
+                                    DiscardStreamSessionUntil = 0;
+                                    droppedSession = true;
+                                    console.log('[AD DEBUG] Dropping cached stream session after failed recovery — using the freshly fetched playlist');
+                                    streamInfo = null;
+                                }
                                 if (streamInfo != null && streamInfo.EncodingsM3U8 != null && (streamInfo.ResolutionList.length === 0 || !(await fetchPlaylist(streamInfo.ResolutionList[0].Url, realFetch, BackupRequestTimeout, true)))) {
                                     // The cached encodings are dead (the stream probably restarted)
                                     streamInfo = null;
@@ -769,6 +784,11 @@ twitch-videoad.js text/javascript
                                 }
                                 ActiveStreamInfo = streamInfo;
                                 streamInfo.LastSeenAt = Date.now();
+                                if (droppedSession) {
+                                    // The dropped session's break state went with it. Tell the page, or it
+                                    // would stay in an ad break if the fresh playlist carries no ads.
+                                    postStreamMessage(streamInfo, { key: 'UpdateAdBlockBanner', isMidroll: false, hasAds: false, isStrippingAdSegments: false });
+                                }
                                 // Note: do NOT set streamInfo.LastPlayerReload here. It was previously
                                 // set unconditionally on new stream session creation, which caused the
                                 // first end-of-break reload of every new channel to be blocked by
@@ -1951,7 +1971,9 @@ twitch-videoad.js text/javascript
                 streamInfo.LoggedFastAutoplayReprobeThisBreak = false;
                 // A no-strip break needs a reset only if backup playback changed the media source.
                 if (!hadStrippedSegments) {
-                    console.log('[AD DEBUG] CSAI-only ad break (stripped 0) — clearing backup without player action');
+                    if (!streamInfo.LastCommittedBackupPlayerType) {
+                        console.log('[AD DEBUG] CSAI-only ad break (stripped 0) — clearing backup without player action');
+                    }
                     streamInfo.IsUsingModifiedM3U8 = false;
                     // Exception: if ANY backup was committed during this break (escape hatch
                     // or cycle rescue that didn't meet cycleRescuedCleanly criteria), the
@@ -2604,7 +2626,10 @@ twitch-videoad.js text/javascript
                         playerBufferState.failedRecoveryRetries++;
                         const paused = monitored.player.isPaused();
                         console.log('[AD DEBUG] Player still ' + (paused ? 'paused' : 'frozen') + ' 10s after recovery stopped (readyState=' + video.readyState
-                            + ') - retry ' + playerBufferState.failedRecoveryRetries + '/2');
+                            + ') - retry ' + playerBufferState.failedRecoveryRetries + '/2' + (paused ? '' : ' on a fresh stream session'));
+                        // Repeating the reload that just timed out twice changes nothing. Have the
+                        // worker drop its cached session so this one plays the newly fetched playlist.
+                        if (!paused) postTwitchWorkerMessage('DiscardStreamSession');
                         // The recovery paused this player, not the user: allow the resume.
                         if (paused) playerBufferState.weJustPaused = Date.now();
                         watch.reloadUsed = true;
@@ -3936,7 +3961,7 @@ twitch-videoad.js text/javascript
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.43');
+        initializeTASControls('vaft', '68.5.44');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
