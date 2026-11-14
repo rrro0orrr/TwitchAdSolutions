@@ -1196,3 +1196,76 @@ for (const file of files) {
         assert.equal(JSON.parse(calls.at(-1)[1].body).variables.playerType, context.ForceAccessTokenPlayerType);
     });
 }
+
+for (const file of files) {
+    test('synthetic resilience: pruneStreamInfos keeps a paused player\'s stream registered (' + file + ')', () => {
+        let now = 1e9;
+        const { context } = harness(file, { Date: class extends Date { static now() { return now; } } });
+        const age = context.StreamInfoMaxAgeMs;
+        const add = (name, url, seenAgo) => {
+            const stream = context.createStreamInfo(name, '', '');
+            stream.LastSeenAt = now - seenAgo;
+            stream.Urls[url] = {};
+            context.StreamInfos[name] = stream;
+            context.StreamInfosByUrl[url] = stream;
+        };
+        // Only stream, paused for longer than the max age: nothing else is polled, so it stays registered
+        add('paused', 'https://fixture.invalid/paused.m3u8', age + 60000);
+        context.pruneStreamInfos();
+        assert.ok(context.StreamInfos.paused);
+        assert.ok(context.StreamInfosByUrl['https://fixture.invalid/paused.m3u8']);
+        // The user moved on to another channel: the stale stream is pruned, the active one stays
+        add('active', 'https://fixture.invalid/active.m3u8', 1000);
+        context.pruneStreamInfos();
+        assert.equal(context.StreamInfos.paused, undefined);
+        assert.equal(context.StreamInfosByUrl['https://fixture.invalid/paused.m3u8'], undefined);
+        assert.ok(context.StreamInfos.active);
+        // Malformed entries are always dropped
+        context.StreamInfos.broken = { LastSeenAt: 0, Urls: {} };
+        context.pruneStreamInfos();
+        assert.equal(context.StreamInfos.broken, undefined);
+    });
+
+    test('synthetic resilience: a mute the user sets is tracked, Twitch\'s and vaft\'s own are not (' + file + ')', () => {
+        let now = 1e9;
+        const listeners = {};
+        class FakeVideo { constructor() { this.muted = false; } }
+        const video = new FakeVideo();
+        const state = { userMuteIntent: false, lastUserInputAt: 0, lastOwnMuteAt: 0 };
+        const { context } = harness(file, {
+            Date: class extends Date { static now() { return now; } },
+            HTMLVideoElement: FakeVideo, playerBufferState: state,
+            document: { addEventListener(name, fn) { (listeners[name] ||= []).push(fn); } }
+        });
+        context.getPlayerVideoElement = () => video;
+        context.trackUserMuteIntent();
+        const fire = (name, event) => listeners[name].forEach(fn => fn(event));
+        const volumeChange = muted => { video.muted = muted; fire('volumechange', { target: video }); };
+        // Mute without any user input: Twitch's own, not recorded
+        volumeChange(true);
+        assert.equal(state.userMuteIntent, false);
+        // Typing in chat does not count as input
+        fire('keydown', { target: { tagName: 'TEXTAREA' } });
+        volumeChange(false); volumeChange(true);
+        assert.equal(state.userMuteIntent, false);
+        // The "m" key outside a text field, then a mute: the user's choice
+        fire('keydown', { target: { tagName: 'BODY' } });
+        volumeChange(false); volumeChange(true);
+        assert.equal(state.userMuteIntent, true);
+        // vaft's own unmute right after a reload is not taken for the user's
+        now += 5000;
+        fire('keydown', { target: { tagName: 'BODY' } });
+        state.lastOwnMuteAt = now;
+        volumeChange(false);
+        assert.equal(state.userMuteIntent, true);
+        // A real unmute by the user clears the intent
+        now += 2000;
+        fire('keydown', { target: { tagName: 'BODY' } });
+        volumeChange(true); volumeChange(false);
+        assert.equal(state.userMuteIntent, false);
+        // Input more than 1.5s before the change does not count
+        now += 5000;
+        volumeChange(true);
+        assert.equal(state.userMuteIntent, false);
+    });
+}

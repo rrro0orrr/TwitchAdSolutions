@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      68.5.44
+// @version      68.5.45
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 129;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 130;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'userscript';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -141,11 +141,25 @@
         scope.AllSegmentsAreAdSegments = false;
         scope.StreamInfoMaxAgeMs = 30 * 60 * 1000;
     }
+    // Drops streams the player has left: not polled for StreamInfoMaxAgeMs while another stream in this
+    // worker was. Age alone is not enough. A paused player polls nothing but keeps its variant URLs and
+    // resumes with them; pruning that stream left the URLs unknown to processM3U8, which then passed the
+    // playlist through unfiltered (ad on resume after a long pause). Worker-serialized.
     function pruneStreamInfos() {
         const now = Date.now();
+        let newestSeenAt = 0;
+        for (const channelName in StreamInfos) {
+            const seenAt = StreamInfos[channelName] && StreamInfos[channelName].LastSeenAt;
+            if (seenAt > newestSeenAt) {
+                newestSeenAt = seenAt;
+            }
+        }
+        // A stale stream can only be older than a stream seen within the window, so this means "another stream is in use"
+        const anotherStreamActive = newestSeenAt > 0 && (now - newestSeenAt) <= StreamInfoMaxAgeMs;
         for (const channelName in StreamInfos) {
             const streamInfo = StreamInfos[channelName];
-            if (!streamInfo || !streamInfo.LastSeenAt || (now - streamInfo.LastSeenAt) > StreamInfoMaxAgeMs) {
+            const malformed = !streamInfo || !streamInfo.LastSeenAt;
+            if (malformed || ((now - streamInfo.LastSeenAt) > StreamInfoMaxAgeMs && anotherStreamActive)) {
                 if (streamInfo && streamInfo.Urls) {
                     for (const url in streamInfo.Urls) {
                         delete StreamInfosByUrl[url];
@@ -2269,6 +2283,9 @@
         weJustPaused: 0,
         inAdBreak: false,
         vaftEverUnmuted: false,
+        userMuteIntent: false,// set when the player <video> is muted within 1.5s of input aimed at the player (the user's own mute)
+        lastUserInputAt: 0,
+        lastOwnMuteAt: 0,// vaft's own mute/unmute around a reload, so trackUserMuteIntent does not take it for the user's
         adPlaybackWatch: null,
         gapJumpLastPosition: -1,
         gapJumpStuckTicks: 0
@@ -3283,8 +3300,11 @@
             };
             const restoreMute = () => {
                 if (!isCurrent() || muteWasChanged() || snapshot.get('video-muted')?.includes('"default":true')) return;
+                // The user muted the player themselves and vaft did not pre-mute it: leave it muted.
+                if (playerBufferState.userMuteIntent && !preMutedVideo) return;
                 const current = getPlayerAndState()?.player?.getHTMLVideoElement?.();
                 if (current) {
+                    playerBufferState.lastOwnMuteAt = Date.now();
                     current.muted = false;
                     playerBufferState.vaftEverUnmuted = true;
                 }
@@ -3370,10 +3390,16 @@
             const prepareMute = () => {
                 if (!hardReload) return;
                 const video = getPlayerAndState()?.player?.getHTMLVideoElement?.();
-                const shouldRecover = playerBufferState.vaftEverUnmuted && RecoverFromSilentMute;
+                // A mute the user set (trackUserMuteIntent) is never "recovered": vaftEverUnmuted is true after
+                // the first ad break, so without this a deliberate mid-session mute was undone after the next reload.
+                const shouldRecover = playerBufferState.vaftEverUnmuted && RecoverFromSilentMute && !playerBufferState.userMuteIntent;
+                if (video && video.muted && !shouldRecover && playerBufferState.vaftEverUnmuted && RecoverFromSilentMute && playerBufferState.userMuteIntent) {
+                    console.log('[AD DEBUG] Hard reload: player muted by the user — keeping it muted (no silent re-mute recovery)');
+                }
                 if (video && (!video.muted || shouldRecover) && !snapshot.get('video-muted')?.includes('"default":true') && !muteWasChanged()) {
                     cleanupMute();
                     if (!video.muted) preMutedVideo = video;
+                    playerBufferState.lastOwnMuteAt = Date.now();
                     video.muted = true;
                     const listener = event => {
                         if (event.target === getPlayerAndState()?.player?.getHTMLVideoElement?.()) {
@@ -4030,7 +4056,7 @@
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.44');
+        initializeTASControls('vaft', '68.5.45');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
@@ -4171,6 +4197,34 @@
         }
     } catch {}
     console.log('[AD DEBUG] Config: ReloadPlayerAfterAd = ' + ReloadPlayerAfterAd + ', ForceAccessTokenPlayerType = ' + ForceAccessTokenPlayerType + ', PinBackupPlayerType = ' + PinBackupPlayerType);
+    // User mute intent: a mute/unmute of the player <video> within 1.5s of input aimed at the player (click,
+    // drag or wheel on the player, or a key pressed outside a text field: Twitch's mute button, volume slider,
+    // "m") is the user's choice; changes without such input are Twitch's own (autoplay policy, silent re-mute
+    // after a reload, volume restore on a new media element). Typing in chat does not count, and neither does
+    // vaft's own mute/unmute around a reload. Media events do not bubble, so listen in the capture phase on document.
+    function trackUserMuteIntent() {
+        const inPlayer = (el) => !!el && typeof el.closest === 'function' && !!el.closest('.video-player, [data-a-target="video-player"]');
+        const isTextField = (el) => !!el && (el.isContentEditable === true || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName || ''));
+        const markPointer = (e) => { if (inPlayer(e.target)) playerBufferState.lastUserInputAt = Date.now(); };
+        document.addEventListener('pointerdown', markPointer, true);
+        document.addEventListener('pointerup', markPointer, true);
+        document.addEventListener('pointermove', (e) => { if (e.buttons) markPointer(e); }, true);// volume slider drag
+        document.addEventListener('wheel', markPointer, { capture: true, passive: true });
+        document.addEventListener('keydown', (e) => { if (!isTextField(e.target)) playerBufferState.lastUserInputAt = Date.now(); }, true);
+        document.addEventListener('volumechange', (e) => {
+            try {
+                const target = e.target;
+                if (!(target instanceof HTMLVideoElement) || target !== getPlayerVideoElement()) return;
+                if (Date.now() - playerBufferState.lastOwnMuteAt < 1000) return;
+                if (Date.now() - playerBufferState.lastUserInputAt > 1500) return;
+                if (playerBufferState.userMuteIntent !== target.muted) {
+                    playerBufferState.userMuteIntent = target.muted;
+                    console.log('[AD DEBUG] User ' + (target.muted ? 'muted' : 'unmuted') + ' the player — ' + (target.muted ? 'reloads will keep it muted' : 'silent re-mute recovery active again'));
+                }
+            } catch {}
+        }, true);
+    }
+    trackUserMuteIntent();
     hookWindowWorker();
     hookFetch();
     document.addEventListener('loadstart', onMediaEventForSeparateVideoAds, true);
