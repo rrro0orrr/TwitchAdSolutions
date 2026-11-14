@@ -498,7 +498,7 @@ function playbackContext(source) {
         backgroundResumeState: { chains: 0, loggedGiveUp: false },
         clearBackgroundResumeTimers() {},
         playPlayer: player => player.play(),
-        hideTwitchAdOverlays() {}, updateAdblockBanner() {},
+        hideTwitchAdOverlays() {}, updateAdblockBanner() {}, checkPlayerErrorRecovery() {},
         initializeTASControls() {}, recordTASDiagnostic() {},
         isActivelyStrippingAds: false, playerForMonitoringBuffering: null
     });

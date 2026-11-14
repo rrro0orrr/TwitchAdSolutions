@@ -1269,3 +1269,68 @@ for (const file of files) {
         assert.equal(state.userMuteIntent, false);
     });
 }
+
+for (const file of files) {
+    test('synthetic resilience: planPlayerErrorRecovery limits error recovery reloads (' + file + ')', () => {
+        const playerErrorState = { enabled: true, firstSeenAt: 0, logged: false, recoveries: [], gaveUpAt: 0 };
+        const { context } = harness(file, { playerErrorState });
+        const plan = (...args) => context.planPlayerErrorRecovery(...args);
+        const t0 = 1e9;
+        assert.equal(plan(null, t0, 5000, 1000, true), null, 'no error code, nothing to do');
+        assert.equal(plan('4000', t0, 5000, 120000, false), null, 'error unrelated to vaft is left alone');
+        assert.equal(plan('4000', t0, 1000, 1000, false), null, 'error must be visible for 2s first');
+        assert.equal(plan('4000', t0, 5000, 1000, false).reload, true, 'recent vaft reload');
+        assert.equal(plan('4000', t0 + 5000, 8000, 1000, false), null, '15s between attempts');
+        assert.equal(plan('4000', t0 + 20000, 8000, 120000, true).reload, true, 'ad break counts without a recent reload');
+        const gaveUp = plan('4000', t0 + 40000, 8000, 1000, false);
+        assert.equal(gaveUp.reload, false, 'third attempt in 10 minutes gives up');
+        assert.match(gaveUp.log, /giving up/);
+        assert.equal(plan('4000', t0 + 60000, 8000, 1000, false), null, 'one giving up line per 10 minutes');
+        assert.equal(plan('4000', t0 + 700000, 8000, 1000, false).reload, true, 'window expired');
+        playerErrorState.enabled = false;
+        assert.equal(plan('4000', t0 + 2e6, 8000, 1000, false), null, 'opt-out');
+    });
+
+    test('synthetic resilience: ' + file + ' replaces a player stopped by Twitch\'s error screen after a vaft reload', () => {
+        const h = monitorHarness(file);
+        const { context, current } = h;
+        let overlay = null;
+        context.PlayerErrorPattern = /(?:Error|Fehler)\s*#([1-4]000)\b/;
+        context.playerErrorState = { enabled: true, firstSeenAt: 0, logged: false, recoveries: [], gaveUpAt: 0 };
+        context.document.querySelector = () => overlay;
+        // Twitch's error screen: the player counts as paused and nothing acts on it
+        current.player.isPaused = () => true;
+        current.player.core.paused = true;
+        current.player.video.paused = true;
+        context.playerBufferState.lastReloadAt = context.Date.now();
+        assert.equal(context.findPlayerErrorCode(), null);
+        overlay = { textContent: 'This video is either unavailable or not supported in this browser. (Error #4000)' };
+        assert.equal(context.findPlayerErrorCode(), '4000');
+        h.advance(300);
+        const before = h.reloads.length;
+        context.doTwitchPlayerTask(false, true, 'early');
+        assert.equal(h.reloads.length, before, 'a paused player ignores an ordinary early reset');
+        h.advance(4000);
+        assert.equal(h.reloads.length, before + 1, 'the monitor tick replaced the dead player');
+        assert.equal(h.reloads.at(-1).isNewMediaPlayerInstance, true);
+        assert.equal(h.reloads.at(-1).refreshAccessToken, true);
+        assert.match(context.playerBufferState.lastReloadDesc, /hard, error-recovery/);
+        context.doTwitchPlayerTask.recovery?.cancel();
+    });
+
+    test('synthetic resilience: ' + file + ' leaves a Twitch error alone when vaft did not cause it', () => {
+        const h = monitorHarness(file);
+        const { context, current } = h;
+        context.PlayerErrorPattern = /(?:Error|Fehler)\s*#([1-4]000)\b/;
+        context.playerErrorState = { enabled: true, firstSeenAt: 0, logged: false, recoveries: [], gaveUpAt: 0 };
+        context.document.querySelector = () => ({ textContent: 'Error #2000' });
+        current.player.isPaused = () => true;
+        current.player.core.paused = true;
+        current.player.video.paused = true;
+        context.playerBufferState.lastReloadAt = 0;
+        context.playerBufferState.inAdBreak = false;
+        const before = h.reloads.length;
+        h.advance(5000);
+        assert.equal(h.reloads.length, before);
+    });
+}
