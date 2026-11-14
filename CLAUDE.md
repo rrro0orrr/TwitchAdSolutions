@@ -30,7 +30,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.44/129, video-swap-new 1.94/62, strip 1.12/29.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.46/131, video-swap-new 1.94/62, strip 1.12/29.
 
 ## localStorage Config
 
@@ -49,6 +49,7 @@ All read at init, injected into worker blob:
 - `twitchAdSolutions_recoverFromSilentMute` — opt-out (default `true`). On hard reload, if the element is already muted but vaft has successfully unmuted at any point earlier this session, recover via the 5500ms backstop (Twitch's silent re-mute pattern — issue #200). Disable via `'false'` if you deliberately mute mid-session and want that preserved across reloads. Users muted from session start are always respected (vaftEverUnmuted=false short-circuits the recovery check). vaft only.
 - `twitchAdSolutions_disableAdSpoofing` — opt-in via `'false'` (default `'true'` — spoofing is OFF). When enabled, on ad detect vaft fires the GQL ad-tracking beacons (`video_ad_impression`, `video_ad_quartile_complete` × 4, `video_ad_pod_complete`) that Twitch's player would have sent if the ad had played normally. Originally intended to mimic the ad-completion signal Twitch expects and may reduce detection escalation — but the always-100%-watched + audible + visible beacon pattern may itself fingerprint as anomalous (silently, without GQL rejection) and trigger detection escalation in the other direction (observed correlation with CSAI ads reaching committed backups + TTV-AB maintainer hypothesis). Default flipped from on→off after v68.2.0. Set to `'false'` to re-enable (for A/B testing whether spoofing affects ad break duration / CSAI escalation on your channels). Failures swallowed (never blocks ad-block flow). vaft only.
 - `twitchAdSolutions_blockClientSideAds` — opt-out via `'false'` (default on), vaft only. Fails page and worker requests to `edge.ads.twitch.tv` / `vaes.amazon-adsystem.com` and strips the `CLASS="twitch-maf-ad"` DATERANGE from served playlists without switching to a backup.
+- `twitchAdSolutions_errorRecovery` — opt-out via `'false'` (default on), vaft only. If Twitch's error overlay (#1000-#4000) is up for 2s and vaft reloaded the player within 60s or an ad break is active, replace the player once (`error-recovery` reload: hard, new token, allowed on a paused player). 15s apart, two per 10 minutes. Ported from Helli24/TwitchAdSolutions v68.12.0.
 - `twitchAdSolutions_disablePostBreakWedge` — opt-out via `'true'` (default off = feature on). Disables the post-break video-wedge recovery (v667/v68.5.0, TTV-AB _checkPostBreakWedge mirror) for A/B isolation.
 
 - `twitchAdSolutions_pageRefreshFallback` -- opt-in via `true`, vaft only. After two timed-out recovery attempts and 3 additional stalled seconds, refresh the document if the same video/route remains live and unpaused. Session storage timestamp `twitchAdSolutions_lastPageRefreshAt` limits it to once every 5 minutes per tab; fail closed on unavailable storage. Never trigger from success, exception, cancellation or unavailable-player outcomes.

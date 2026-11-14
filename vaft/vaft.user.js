@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      68.5.44
+// @version      68.5.46
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 129;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 131;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'userscript';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -141,11 +141,25 @@
         scope.AllSegmentsAreAdSegments = false;
         scope.StreamInfoMaxAgeMs = 30 * 60 * 1000;
     }
+    // Drops streams the player has left: not polled for StreamInfoMaxAgeMs while another stream in this
+    // worker was. Age alone is not enough. A paused player polls nothing but keeps its variant URLs and
+    // resumes with them; pruning that stream left the URLs unknown to processM3U8, which then passed the
+    // playlist through unfiltered (ad on resume after a long pause). Worker-serialized.
     function pruneStreamInfos() {
         const now = Date.now();
+        let newestSeenAt = 0;
+        for (const channelName in StreamInfos) {
+            const seenAt = StreamInfos[channelName] && StreamInfos[channelName].LastSeenAt;
+            if (seenAt > newestSeenAt) {
+                newestSeenAt = seenAt;
+            }
+        }
+        // A stale stream can only be older than a stream seen within the window, so this means "another stream is in use"
+        const anotherStreamActive = newestSeenAt > 0 && (now - newestSeenAt) <= StreamInfoMaxAgeMs;
         for (const channelName in StreamInfos) {
             const streamInfo = StreamInfos[channelName];
-            if (!streamInfo || !streamInfo.LastSeenAt || (now - streamInfo.LastSeenAt) > StreamInfoMaxAgeMs) {
+            const malformed = !streamInfo || !streamInfo.LastSeenAt;
+            if (malformed || ((now - streamInfo.LastSeenAt) > StreamInfoMaxAgeMs && anotherStreamActive)) {
                 if (streamInfo && streamInfo.Urls) {
                     for (const url in streamInfo.Urls) {
                         delete StreamInfosByUrl[url];
@@ -2269,6 +2283,10 @@
         weJustPaused: 0,
         inAdBreak: false,
         vaftEverUnmuted: false,
+        lastReloadDesc: '',// 'hard|soft, <kind>' of the last reload, for the player error diagnostic
+        userMuteIntent: false,// set when the player <video> is muted within 1.5s of input aimed at the player (the user's own mute)
+        lastUserInputAt: 0,
+        lastOwnMuteAt: 0,// vaft's own mute/unmute around a reload, so trackUserMuteIntent does not take it for the user's
         adPlaybackWatch: null,
         gapJumpLastPosition: -1,
         gapJumpStuckTicks: 0
@@ -2334,6 +2352,74 @@
             if (activeVideo()) clearIntent('play');
         });
     }
+    // Player error recovery, ported from Helli24/TwitchAdSolutions v68.12.0. A vaft reload (for example the
+    // codec swap at ad start on a 1440p HEVC stream) can fail inside the player: Twitch then shows its error
+    // overlay (Error #4000, "No playable format") and the player stays dead, because a player that stopped with
+    // an error counts as paused and nothing acts on a paused player.
+    // When Twitch's error overlay (#1000/#2000/#3000/#4000) has been up for 2s and vaft itself reloaded the
+    // player in the last 60s or is blocking an ad break, replace the player once (hard reload, new access
+    // token). Limits: 15s between attempts, two per 10 minutes, then one "giving up" line per 10 minutes.
+    // Errors that have nothing to do with vaft are logged but left alone.
+    // Opt-out: twitchAdSolutions_errorRecovery=false.
+    const PlayerErrorPattern = /(?:Error|Fehler)\s*#([1-4]000)\b/;
+    const playerErrorState = {
+        enabled: true,
+        firstSeenAt: 0,
+        logged: false,
+        recoveries: [],// timestamps of the recovery reloads of the last 10 minutes
+        gaveUpAt: 0
+    };
+    function findPlayerErrorCode() {
+        const root = document.querySelector('[data-a-target="video-player"]') || document.querySelector('.video-player');
+        const match = root ? PlayerErrorPattern.exec(root.textContent || '') : null;
+        return match ? match[1] : null;
+    }
+    // Decision only (no side effects besides its own bookkeeping): null, or { reload, log }
+    function planPlayerErrorRecovery(code, now, errorVisibleMs, sinceVaftReloadMs, inAdBreak) {
+        if (!playerErrorState.enabled || !code) return null;
+        if (!(sinceVaftReloadMs <= 60000) && !inAdBreak) return null;
+        if (errorVisibleMs < 2000) return null;
+        const recoveries = playerErrorState.recoveries;
+        while (recoveries.length > 0 && now - recoveries[0] > 600000) {
+            recoveries.shift();
+        }
+        if (recoveries.length > 0 && now - recoveries[recoveries.length - 1] < 15000) return null;
+        if (recoveries.length >= 2) {
+            if (now - playerErrorState.gaveUpAt < 600000) return null;
+            playerErrorState.gaveUpAt = now;
+            return { reload: false, log: '[AD DEBUG] Player error #' + code + ' is still there after 2 recovery reloads in 10 minutes — giving up for now. Refresh the tab (F5) and report this log' };
+        }
+        recoveries.push(now);
+        return { reload: true, log: '[AD DEBUG] Player error #' + code + ' after a vaft reload or during an ad break — replacing the player (' + recoveries.length + '/2 in 10 minutes). Opt-out: twitchAdSolutions_errorRecovery=false' };
+    }
+    function checkPlayerErrorRecovery() {
+        try {
+            const code = findPlayerErrorCode();
+            if (!code) {
+                playerErrorState.firstSeenAt = 0;
+                playerErrorState.logged = false;
+                return;
+            }
+            const now = Date.now();
+            if (!playerErrorState.firstSeenAt) playerErrorState.firstSeenAt = now;
+            const sinceReloadMs = playerBufferState.lastReloadAt ? now - playerBufferState.lastReloadAt : Infinity;
+            if (!playerErrorState.logged) {
+                playerErrorState.logged = true;
+                console.log('[AD DEBUG] Player error #' + code + ' shown — last vaft reload: ' +
+                    (playerBufferState.lastReloadAt ? (sinceReloadMs / 1000).toFixed(1) + 's ago (' + (playerBufferState.lastReloadDesc || 'unknown') + ')' : 'none') +
+                    ', ad break: ' + (playerBufferState.inAdBreak ? 'yes' : 'no'));
+            }
+            const plan = planPlayerErrorRecovery(code, now, now - playerErrorState.firstSeenAt, sinceReloadMs, playerBufferState.inAdBreak === true);
+            if (plan) {
+                console.log(plan.log);
+                if (plan.reload) {
+                    doTwitchPlayerTask(false, true, 'error-recovery');
+                }
+            }
+        } catch (err) {
+            console.log('[AD DEBUG] Player error check failed: ' + err.message);
+        }
+    }
     // Poll the player state to detect and fix buffering caused by ad stream switching
     function monitorPlayerBuffering() {
         clearTimeout(monitorPlayerBuffering.timeoutId);
@@ -2358,6 +2444,7 @@
                     state: playerAndState.state
                 };
                 updatePlayerPauseIntent(playerAndState);
+                checkPlayerErrorRecovery();
             }
         }
         if (playerForMonitoringBuffering) {
@@ -3146,7 +3233,9 @@
         const playerPaused = player.isPaused();
         const wasPaused = playerPaused || player.core?.paused;
         // Paused decoder internals can be the failure requiring a reset, not a user action.
-        const requiredReset = isReload && reloadKind === 'early' && !playerPaused && !document.pictureInPictureElement;
+        // 'error-recovery' replaces a player that stopped with Twitch's error overlay, which counts as paused.
+        const requiredReset = isReload && !document.pictureInPictureElement
+            && ((reloadKind === 'early' && !playerPaused) || reloadKind === 'error-recovery');
         if (wasPaused && !requiredReset) {
             if (playerBufferState.weJustPaused && (Date.now() - playerBufferState.weJustPaused) < 10000) {
                 try { player.play()?.catch?.(() => {}); } catch {}
@@ -3173,7 +3262,7 @@
             return;
         }
         // Playback and live latency cannot prove mixed-source tracks are synchronized.
-        if (isReload && reloadKind !== 'early') {
+        if (isReload && reloadKind !== 'early' && reloadKind !== 'error-recovery') {
             const video = player.getHTMLVideoElement?.();
             if (video && video.readyState >= 3 && !video.paused && !video.ended) {
                 let latencySec = 0;
@@ -3222,8 +3311,10 @@
             let attempt = 0, maxAttempts = 2, needsUpgrade = false;
             let deadline = 0, observedVideo = null, initialTime = 0, playedVideo = null;
             let settingsAfterReload, preMutedVideo = null;
-            let hardReload = reloadKind === 'early' && !iosSoftReload;
-            let refreshToken = reloadKind === 'early';
+            // 'error-recovery' needs a new media player instance and a fresh token like a required 'early' reset.
+            const replacePlayer = reloadKind === 'early' || reloadKind === 'error-recovery';
+            let hardReload = replacePlayer && !iosSoftReload;
+            let refreshToken = replacePlayer;
             request.upgrade = () => {
                 if (refreshToken) return;
                 refreshToken = true;
@@ -3283,8 +3374,11 @@
             };
             const restoreMute = () => {
                 if (!isCurrent() || muteWasChanged() || snapshot.get('video-muted')?.includes('"default":true')) return;
+                // The user muted the player themselves and vaft did not pre-mute it: leave it muted.
+                if (playerBufferState.userMuteIntent && !preMutedVideo) return;
                 const current = getPlayerAndState()?.player?.getHTMLVideoElement?.();
                 if (current) {
+                    playerBufferState.lastOwnMuteAt = Date.now();
                     current.muted = false;
                     playerBufferState.vaftEverUnmuted = true;
                 }
@@ -3341,7 +3435,8 @@
                 playerBufferState.adStallStartAt = 0;
                 playerBufferState.weJustPaused = Date.now();
                 playerForMonitoringBuffering = null;
-                console.log('[AD DEBUG] Reloading Twitch player (' + (hardReload ? 'hard' : 'soft') + ', attempt ' + attempt + '/' + maxAttempts + ')');
+                playerBufferState.lastReloadDesc = (hardReload ? 'hard' : 'soft') + ', ' + (reloadKind || 'no kind');
+                console.log('[AD DEBUG] Reloading Twitch player (' + (hardReload ? 'hard' : 'soft') + ', attempt ' + attempt + '/' + maxAttempts + ')' + (reloadKind ? ' — ' + reloadKind : ''));
                 recordTASDiagnostic({ event: 'reload-start', attempt, hardReload });
                 prepareMute();
                 try {
@@ -3370,10 +3465,16 @@
             const prepareMute = () => {
                 if (!hardReload) return;
                 const video = getPlayerAndState()?.player?.getHTMLVideoElement?.();
-                const shouldRecover = playerBufferState.vaftEverUnmuted && RecoverFromSilentMute;
+                // A mute the user set (trackUserMuteIntent) is never "recovered": vaftEverUnmuted is true after
+                // the first ad break, so without this a deliberate mid-session mute was undone after the next reload.
+                const shouldRecover = playerBufferState.vaftEverUnmuted && RecoverFromSilentMute && !playerBufferState.userMuteIntent;
+                if (video && video.muted && !shouldRecover && playerBufferState.vaftEverUnmuted && RecoverFromSilentMute && playerBufferState.userMuteIntent) {
+                    console.log('[AD DEBUG] Hard reload: player muted by the user — keeping it muted (no silent re-mute recovery)');
+                }
                 if (video && (!video.muted || shouldRecover) && !snapshot.get('video-muted')?.includes('"default":true') && !muteWasChanged()) {
                     cleanupMute();
                     if (!video.muted) preMutedVideo = video;
+                    playerBufferState.lastOwnMuteAt = Date.now();
                     video.muted = true;
                     const listener = event => {
                         if (event.target === getPlayerAndState()?.player?.getHTMLVideoElement?.()) {
@@ -3611,7 +3712,7 @@
         if (data.quality !== undefined) entry.quality = /^\d{1,5}x\d{1,5}$/.test(data.quality) ? data.quality : 'unknown';
         if (Number.isFinite(data.durationMs)) entry.durationMs = Math.min(60000, Math.max(0, data.durationMs));
         if (data.event === 'reload-request') {
-            entry.reason = ['early', 'worker-error', 'normal'].includes(data.reason) ? data.reason : 'normal';
+            entry.reason = ['early', 'worker-error', 'error-recovery', 'normal'].includes(data.reason) ? data.reason : 'normal';
             state.current.recovery = entry.reason;
         }
         if (data.event === 'backup-selected') {
@@ -3697,7 +3798,8 @@
             ['disableAdSpoofing', 'Disable ad-completion spoofing', true, 'boolean'],
             ['disablePostBreakWedge', 'Disable post-break video recovery', false, 'boolean'],
             ['disableReloadCap', 'Allow unlimited recovery reloads', false, 'boolean'],
-            ['iosSoftReload', 'Preserve the player on Apple touch devices', true, 'boolean']
+            ['iosSoftReload', 'Preserve the player on Apple touch devices', true, 'boolean'],
+            ['errorRecovery', 'Replace the player after a Twitch error screen', true, 'boolean', 'If Twitch shows an error (#1000-#4000) right after a vaft reload or during an ad break, replace the player once. At most 2 per 10 minutes.']
         );
         let advanced;
         const fields = definitions.map(([key, title, fallback, type, hint], index) => {
@@ -4030,7 +4132,7 @@
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.44');
+        initializeTASControls('vaft', '68.5.46');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
@@ -4148,6 +4250,10 @@
             DisableAdSpoofing = false;
             console.log('[AD DEBUG] AdSpoofing enabled via localStorage opt-in; default is off. Spoof counts reset when the worker restarts.');
         }
+        if (localStorage.getItem('twitchAdSolutions_errorRecovery') === 'false') {
+            playerErrorState.enabled = false;
+            console.log('[AD DEBUG] Player error recovery disabled via localStorage — no reload when Twitch shows an error after a vaft reload');
+        }
         const lsRecoverFromSilentMute = localStorage.getItem('twitchAdSolutions_recoverFromSilentMute');
         if (lsRecoverFromSilentMute === 'false') {
             RecoverFromSilentMute = false;
@@ -4171,6 +4277,34 @@
         }
     } catch {}
     console.log('[AD DEBUG] Config: ReloadPlayerAfterAd = ' + ReloadPlayerAfterAd + ', ForceAccessTokenPlayerType = ' + ForceAccessTokenPlayerType + ', PinBackupPlayerType = ' + PinBackupPlayerType);
+    // User mute intent: a mute/unmute of the player <video> within 1.5s of input aimed at the player (click,
+    // drag or wheel on the player, or a key pressed outside a text field: Twitch's mute button, volume slider,
+    // "m") is the user's choice; changes without such input are Twitch's own (autoplay policy, silent re-mute
+    // after a reload, volume restore on a new media element). Typing in chat does not count, and neither does
+    // vaft's own mute/unmute around a reload. Media events do not bubble, so listen in the capture phase on document.
+    function trackUserMuteIntent() {
+        const inPlayer = (el) => !!el && typeof el.closest === 'function' && !!el.closest('.video-player, [data-a-target="video-player"]');
+        const isTextField = (el) => !!el && (el.isContentEditable === true || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName || ''));
+        const markPointer = (e) => { if (inPlayer(e.target)) playerBufferState.lastUserInputAt = Date.now(); };
+        document.addEventListener('pointerdown', markPointer, true);
+        document.addEventListener('pointerup', markPointer, true);
+        document.addEventListener('pointermove', (e) => { if (e.buttons) markPointer(e); }, true);// volume slider drag
+        document.addEventListener('wheel', markPointer, { capture: true, passive: true });
+        document.addEventListener('keydown', (e) => { if (!isTextField(e.target)) playerBufferState.lastUserInputAt = Date.now(); }, true);
+        document.addEventListener('volumechange', (e) => {
+            try {
+                const target = e.target;
+                if (!(target instanceof HTMLVideoElement) || target !== getPlayerVideoElement()) return;
+                if (Date.now() - playerBufferState.lastOwnMuteAt < 1000) return;
+                if (Date.now() - playerBufferState.lastUserInputAt > 1500) return;
+                if (playerBufferState.userMuteIntent !== target.muted) {
+                    playerBufferState.userMuteIntent = target.muted;
+                    console.log('[AD DEBUG] User ' + (target.muted ? 'muted' : 'unmuted') + ' the player — ' + (target.muted ? 'reloads will keep it muted' : 'silent re-mute recovery active again'));
+                }
+            } catch {}
+        }, true);
+    }
+    trackUserMuteIntent();
     hookWindowWorker();
     hookFetch();
     document.addEventListener('loadstart', onMediaEventForSeparateVideoAds, true);
