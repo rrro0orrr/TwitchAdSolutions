@@ -30,7 +30,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.47/132, video-swap-new 1.94/62, strip 1.12/29.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.48/133, video-swap-new 1.94/62, strip 1.12/29.
 
 ## localStorage Config
 
@@ -64,7 +64,9 @@ All read at init, injected into worker blob:
 ## Key Architecture (vaft)
 
 - **Buffer monitor** (`monitorPlayerBuffering`) — polls player state every 1-3s (visibility-aware). Detects stalls, fires pause/play or reload.
-- **Reload cooldown** — 30s default, auto-escalates to 90s if 3+ reloads in 5 minutes.
+- **Reload cooldown** — 30s default, auto-escalates to 90s if 3+ end-of-break reloads in 5 minutes. Applied in the worker to the end-of-break reload (both the stripped and the committed-backup branch): inside the window it becomes pause/play. Exempt: leaving a modified (codec-swapped) master. Early reloads, the main-thread watchdogs and error recovery have their own limits and are not gated by it.
+- **Worker crash reloads** — `allowWorkerCrashReload()`: at most two per five minutes across workers.
+- **Minimal requests** — for 1.5s after a player reload the backup search takes the first type that returns a playlist: the type already committed this break, else the head of the normal order (pinned / fast-autoplay first).
 - **Reload cap** — buffer monitor reloads at most once per recovery window (`recoveryReloadUsed`).
 - **Grace periods** — 15s after reload, 10s after backup switch. Buffer monitor skips fixes during these.
 - Ad backup stalls: after observed playback, three seconds without playhead movement with readiness <=2 and <=0.1s buffered at the current position, otherwise eight seconds, during a break requests a hard reset even without stripped segments or multiple buffered ranges. Respect pause, seek and existing grace periods. Allow one recovery request per frozen run; re-arm after playback progresses beyond reload grace. If that recovery times out on both attempts, retry after 10 seconds without progress, at most twice per frozen run, resuming a player the recovery left paused. Each retry reload first posts `DiscardStreamSession`, so the worker drops its cached stream session (15s window, used once) and serves the freshly fetched master instead of the cached one. A frozen `autoplay` backup skips the 10s backup-switch grace.

@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { readScript, createScriptContext } = require('./scripts');
+const vm = require('node:vm');
+const acorn = require('acorn');
+const { readScript, createScriptContext, scriptNodes } = require('./scripts');
 
 const files = ['vaft/vaft.user.js', 'vaft/vaft-ublock-origin.js'];
 const clean = '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:2.000,live\nhttps://fixture.invalid/live.ts\n';
@@ -1332,5 +1334,115 @@ for (const file of files) {
         const before = h.reloads.length;
         h.advance(5000);
         assert.equal(h.reloads.length, before);
+    });
+    test('synthetic resilience: ' + file + ' applies the reload cooldown to end-of-break reloads', async () => {
+        const now = 1000000;
+        const FixedDate = class extends Date { static now() { return now; } };
+        const escalated = [now - 200000, now - 150000, now - 100000];
+        for (const [label, values, cooldown, expected] of [
+            ['stripped break, reload 10s ago', { NumStrippedAdSegments: 4, LastPlayerReload: now - 10000 }, 30, 'PauseResumePlayer'],
+            ['backup break, reload 10s ago', { LastCommittedBackupPlayerType: 'popout', LastPlayerReload: now - 10000 }, 30, 'PauseResumePlayer'],
+            ['cooldown elapsed', { NumStrippedAdSegments: 4, LastPlayerReload: now - 31000 }, 30, 'ReloadPlayer'],
+            ['cooldown disabled', { NumStrippedAdSegments: 4, LastPlayerReload: now - 10000 }, 0, 'ReloadPlayer'],
+            ['no earlier reload', { LastCommittedBackupPlayerType: 'autoplay' }, 30, 'ReloadPlayer'],
+            ['leaving a modified master', { NumStrippedAdSegments: 4, LastPlayerReload: now - 10000, IsUsingModifiedM3U8: true }, 30, 'ReloadPlayer'],
+            ['escalated to 90s, reload 60s ago', { NumStrippedAdSegments: 4, LastPlayerReload: now - 60000, ReloadTimestamps: escalated.slice() }, 30, 'PauseResumePlayer'],
+            ['escalated to 90s, reload 91s ago', { NumStrippedAdSegments: 4, LastPlayerReload: now - 91000, ReloadTimestamps: escalated.slice() }, 30, 'ReloadPlayer']
+        ]) {
+            const { context, messages } = harness(file, { Date: FixedDate });
+            context.ReloadCooldownSeconds = cooldown;
+            const { url, stream } = registerStream(context, {
+                IsShowingAd: true, HasConfirmedAdAttrs: true, CleanPlaylistCount: 2, ...values
+            });
+            await context.processM3U8(url, clean, null);
+            const actions = messages.filter(message => ['ReloadPlayer', 'PauseResumePlayer'].includes(message.key));
+            assert.deepEqual(actions.map(message => message.key), [expected], 'reload cooldown not applied: ' + label);
+            assert.equal(stream.IsShowingAd, false);
+            assert.equal(stream.IsUsingModifiedM3U8, false);
+        }
+    });
+
+    test('synthetic resilience: ' + file + ' escapes captured values written into the worker source', () => {
+        const source = readScript(file), nodes = scriptNodes(source);
+        const template = nodes.find(node => node.type === 'VariableDeclarator' && node.id.name === 'newBlobStr').init;
+        const context = createScriptContext(source, { console, URL, twitchBlobUrl: 'blob:https://www.twitch.tv/fixture' }, nodes);
+        const values = {
+            ForceAccessTokenPlayerType: 'pop\'out\\"\n', GQLDeviceID: 'device\'id', AuthorizationHeader: 'OAuth a\'b\\',
+            ClientIntegrityHeader: 'v4.public.\'x\'', ClientVersion: '1\n2', ClientSession: 'se\\ssion'
+        };
+        Object.assign(context, values);
+        const worker = vm.runInContext(source.slice(template.start, template.end), context);
+        try {
+            acorn.parse(worker, { ecmaVersion: 2022 });
+        } catch (error) {
+            assert.fail('worker source broken by an injected value: ' + error.message);
+        }
+        const injected = worker.slice(worker.indexOf('declareOptions(self);'));
+        for (const [name, value] of Object.entries(values)) {
+            const assigned = new RegExp('^\\s*' + name + ' = (.*);$', 'm').exec(injected);
+            assert.equal(vm.runInNewContext(assigned[1]), value, name);
+        }
+    });
+
+    test('synthetic resilience: ' + file + ' bounds reloads after repeated worker crashes', () => {
+        const { context } = harness(file);
+        assert.equal(typeof context.allowWorkerCrashReload, 'function', 'worker crash reloads are unbounded');
+        assert.equal(context.allowWorkerCrashReload(1000), true);
+        assert.equal(context.allowWorkerCrashReload(2000), true);
+        assert.equal(context.allowWorkerCrashReload(3000), false);
+        assert.equal(context.allowWorkerCrashReload(300999), false);
+        assert.equal(context.allowWorkerCrashReload(301001), true);
+        assert.equal(context.allowWorkerCrashReload(301002), false);
+    });
+
+    const marked = clean.replace('#EXT-X-TARGETDURATION', '#EXT-X-DATERANGE:CLASS="twitch-trigger"\n#EXT-X-TARGETDURATION');
+    function backupHarness(adLaden, failing = []) {
+        const now = 1000000, tokens = [];
+        const h = harness(file, { Date: class extends Date { static now() { return now; } } });
+        h.context.getAccessToken = async (channel, type) => {
+            tokens.push(type);
+            if (failing.includes(type)) throw new Error('fixture server error');
+            return { status: 200, json: async () => ({ data: { streamPlaybackAccessToken: { signature: 'sig', value: type } } }) };
+        };
+        const realFetch = async url => {
+            const parsed = new URL(url);
+            if (parsed.hostname === 'usher.ttvnw.net') {
+                return new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1920x1080,CODECS="avc1.4d4028",FRAME-RATE=60\nhttps://fixture.invalid/backup-'
+                    + parsed.searchParams.get('token') + '.m3u8\n');
+            }
+            return new Response(adLaden.some(type => url.includes('backup-' + type + '.')) ? marked : clean);
+        };
+        return { ...h, now, tokens, realFetch };
+    }
+
+    test('synthetic resilience: ' + file + ' arms fast autoplay when a Source type only fails its token fetch', async () => {
+        for (const [adLaden, failing, expected] of [
+            [['site', 'popout', 'mobile_web'], ['embed'], true],
+            [['site', 'popout', 'mobile_web', 'embed'], [], true],
+            [[], ['site', 'popout', 'mobile_web', 'embed'], false]
+        ]) {
+            const { context, tokens, realFetch } = backupHarness(adLaden, failing);
+            const { url, stream } = registerStream(context);
+            await context.processM3U8(url, marked, realFetch);
+            assert.deepEqual(tokens, ['site', 'popout', 'mobile_web', 'embed', 'autoplay']);
+            assert.equal(stream.ActiveBackupPlayerType, 'autoplay');
+            assert.equal(stream.LastBreakUsedEscapeHatch, expected, 'fast autoplay arming wrong for failing=' + failing.join('+'));
+        }
+    });
+
+    test('synthetic resilience: ' + file + ' keeps the preferred backup type right after a player reload', async () => {
+        for (const [values, expected] of [
+            [{ PinnedBackupPlayerType: 'popout' }, 'popout'],
+            [{ PinnedBackupPlayerType: 'popout', LastCommittedBackupPlayerType: 'site' }, 'site'],
+            [{}, 'site']
+        ]) {
+            const { context, now, tokens, realFetch } = backupHarness([]);
+            const { url, stream } = registerStream(context, {
+                IsShowingAd: true, HasConfirmedAdAttrs: true, LastPlayerReload: now - 100, ...values
+            });
+            await context.processM3U8(url, marked, realFetch);
+            assert.deepEqual(tokens, [expected], 'minimal requests probed the wrong backup type');
+            assert.equal(stream.ActiveBackupPlayerType, expected);
+        }
     });
 }

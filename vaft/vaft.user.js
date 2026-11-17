@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      68.5.47
+// @version      68.5.48
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 132;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 133;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'userscript';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -113,7 +113,6 @@
         scope.EarlyReloadPollThreshold = 3;// Number of consecutive all-stripped polls before triggering early reload (each poll ~2s, so 3 = ~6s, 5 = ~10s, 10 = ~20s; 0 = disable). Lowered from 5 to 3 to match the testing variant — field reports indicate faster early-reload recovers heavier SSAI breaks more cleanly. Override via localStorage twitchAdSolutions_earlyReloadPollThreshold.
         scope.PinBackupPlayerType = true;// Remember which backup player type worked and try it first on next ad break
         scope.PlayerReloadMinimalRequestsTime = 1500;
-        scope.PlayerReloadMinimalRequestsPlayerIndex = 2;//autoplay
         scope.HasTriggeredPlayerReload = false;
         scope.DiscardStreamSessionUntil = 0;// Main thread asked for a fresh stream session on the next master request
         scope.ActiveStreamInfo = null;
@@ -430,12 +429,12 @@
                     BackupSwapFirst = ${BackupSwapFirst};
                     DisableAdSpoofing = ${DisableAdSpoofing};
                     BlockClientSideAds = ${BlockClientSideAds};
-                    ForceAccessTokenPlayerType = '${ForceAccessTokenPlayerType}';
-                    GQLDeviceID = ${GQLDeviceID ? "'" + GQLDeviceID + "'" : null};
-                    AuthorizationHeader = ${AuthorizationHeader ? "'" + AuthorizationHeader + "'" : undefined};
-                    ClientIntegrityHeader = ${ClientIntegrityHeader ? "'" + ClientIntegrityHeader + "'" : null};
-                    ClientVersion = ${ClientVersion ? "'" + ClientVersion + "'" : null};
-                    ClientSession = ${ClientSession ? "'" + ClientSession + "'" : null};
+                    ForceAccessTokenPlayerType = ${JSON.stringify(ForceAccessTokenPlayerType ?? '')};
+                    GQLDeviceID = ${GQLDeviceID ? JSON.stringify(GQLDeviceID) : null};
+                    AuthorizationHeader = ${AuthorizationHeader ? JSON.stringify(AuthorizationHeader) : undefined};
+                    ClientIntegrityHeader = ${ClientIntegrityHeader ? JSON.stringify(ClientIntegrityHeader) : null};
+                    ClientVersion = ${ClientVersion ? JSON.stringify(ClientVersion) : null};
+                    ClientSession = ${ClientSession ? JSON.stringify(ClientSession) : null};
                     self.addEventListener('message', function(e) {
                         if (e.data.key == 'UpdateClientVersion') {
                             ClientVersion = e.data.value;
@@ -572,11 +571,16 @@
                 });
                 // IVS WASM crashes can emit several error events. Deduplicate per worker.
                 // Recovery calls the main reload path directly and bypasses the worker's
-                // reload cooldown; there is no guard across successive crashed workers.
+                // reload cooldown, so allowWorkerCrashReload() bounds it across successive
+                // crashed workers: a worker that fails every time would otherwise reload forever.
                 let crashed = false;
                 this.addEventListener('error', (e) => {
                     if (crashed || !twitchWorkers.includes(this)) return;
                     crashed = true;
+                    if (!allowWorkerCrashReload(Date.now())) {
+                        console.log('[AD DEBUG] IVS WASM worker crashed again: ' + ((e && e.message) || 'unknown error') + ' — 2 crash reloads in the last 5 minutes, not reloading. Refresh the tab (F5) and report this log');
+                        return;
+                    }
                     console.log('[AD DEBUG] IVS WASM worker crashed: ' + ((e && e.message) || 'unknown error') + ' — triggering hard reload to recover');
                     try { doTwitchPlayerTask(false, true, 'early'); } catch (err) {
                         console.log('[AD DEBUG] Worker crash recovery failed: ' + err.message);
@@ -597,6 +601,14 @@
                 }
             }
         });
+    }
+    // At most two worker-crash reloads per five minutes, counted across workers.
+    function allowWorkerCrashReload(now) {
+        const times = allowWorkerCrashReload.times || (allowWorkerCrashReload.times = []);
+        while (times.length > 0 && now - times[0] > 300000) times.shift();
+        if (times.length >= 2) return false;
+        times.push(now);
+        return true;
     }
     function getPlaybackChannelName(playerAndState) {
         const url = new URL(window.location.href);
@@ -1612,13 +1624,9 @@
             let backupPlayerType = null;
             let backupM3u8 = null;
             let fallbackM3u8 = null;
-            let startIndex = 0;
-            let isDoingMinimalRequests = false;
-            if (streamInfo.LastPlayerReload > Date.now() - PlayerReloadMinimalRequestsTime) {
-                // When doing player reload there are a lot of requests which causes the backup stream to load in slow. Briefly prefer using a single version to prevent long delays
-                startIndex = PlayerReloadMinimalRequestsPlayerIndex;
-                isDoingMinimalRequests = true;
-            }
+            // When doing player reload there are a lot of requests which causes the backup stream to load in slow. Briefly prefer using a single version to prevent long delays
+            const isDoingMinimalRequests = streamInfo.LastPlayerReload > Date.now() - PlayerReloadMinimalRequestsTime;
+            const probedBackupTypes = new Set();// Types this search actually reached (FastAutoplayFirstTry arming)
             // Try pinned backup player type first if available
             // When PreferLowQualityBackup is enabled, append 'autoplay' (360p) as a last-resort
             // fallback — mirrors pixeltris's original behavior. Source backups are tried first;
@@ -1694,7 +1702,18 @@
                     }
                 }
             }
-            for (let playerTypeIndex = startIndex; !backupM3u8 && playerTypeIndex < playerTypesToTry.length && Date.now() < backupSearchDeadline && Date.now() >= streamInfo.BackupRetryAt; playerTypeIndex++) {
+            // Minimal requests take the first type that returns a playlist. That used to be a fixed
+            // list index (2, once 'autoplay'), which after the reorders above was an arbitrary type and
+            // skipped the pinned one. Stay on the type this break already committed (warm cache, no
+            // source change); otherwise the head of the order built above is used.
+            if (isDoingMinimalRequests) {
+                const committedIndex = streamInfo.LastCommittedBackupPlayerType ? playerTypesToTry.indexOf(streamInfo.LastCommittedBackupPlayerType) : -1;
+                if (committedIndex > 0) {
+                    playerTypesToTry.splice(committedIndex, 1);
+                    playerTypesToTry.unshift(streamInfo.LastCommittedBackupPlayerType);
+                }
+            }
+            for (let playerTypeIndex = 0; !backupM3u8 && playerTypeIndex < playerTypesToTry.length && Date.now() < backupSearchDeadline && Date.now() >= streamInfo.BackupRetryAt; playerTypeIndex++) {
                 const playerType = playerTypesToTry[playerTypeIndex];
                 const realPlayerType = playerType.replace('-CACHED', '');
                 const failedAt = streamInfo.FailedBackupPlayerTypes.get(realPlayerType);
@@ -1706,6 +1725,7 @@
                     continue;
                 }
                 const isFullyCachedPlayerType = playerType != realPlayerType;
+                probedBackupTypes.add(realPlayerType);
                 for (let i = 0; i < 2 && Date.now() < backupSearchDeadline; i++) {
                     // This caches the m3u8 if it doesn't have ads. If the already existing cache has ads it fetches a new version (second loop)
                     let isFreshM3u8 = false;
@@ -1892,10 +1912,16 @@
                         } else {
                             console.log('[AD DEBUG] Autoplay backup committed — 360p fallback after ' + sourceTried + ' Source type(s) ad-laden (PreferLowQualityBackup)');
                         }
-                        // FastAutoplayFirstTry: only flag the channel as SSAI-uniform when 4 Source
-                        // types were probed and all contaminated. The "0 sourceTried" case (pinned
-                        // from prior break) doesn't add new information.
-                        if (FastAutoplayFirstTry && sourceTried >= 4) {
+                        // FastAutoplayFirstTry: flag the channel as SSAI-uniform when no Source type
+                        // was usable this break: at least one was ad-laden and every other one was
+                        // ad-laden, failed its token fetch or returned no playlist. This was a literal
+                        // "4 ad-laden" count, which a type that only ever fails (see the 'embed' note
+                        // on BackupPlayerTypes) kept at 3, so the fast path never armed. The "0
+                        // sourceTried" case (pinned from prior break) doesn't add new information.
+                        const adLadenTypes = streamInfo.LoggedBackupAdsByType;
+                        const sourceExhausted = BackupPlayerTypes.some(t => adLadenTypes?.has(t))
+                            && BackupPlayerTypes.every(t => adLadenTypes?.has(t) || streamInfo.FailedBackupPlayerTypes.has(t) || probedBackupTypes.has(t));
+                        if (FastAutoplayFirstTry && sourceExhausted) {
                             streamInfo.LastBreakUsedEscapeHatch = true;
                             // Full probe just ran — reset re-probe counter (we just tested Source-tier)
                             streamInfo.FastAutoplayConsecutive = 0;
@@ -1911,7 +1937,7 @@
             } else if (backupM3u8 && !streamInfo.IsShowingAd) {
                 console.log('[AD DEBUG] Discarded stale backup commit (' + backupPlayerType + ', ' + (Date.now() - backupSearchStart) + 'ms) — break ended during search');
             } else {
-                console.log('[AD DEBUG] No ad-free backup stream found — ads may leak. Tried: ' + playerTypesToTry.slice(startIndex).join(', '));
+                console.log('[AD DEBUG] No ad-free backup stream found — ads may leak. Tried: ' + playerTypesToTry.join(', '));
             }
             // TODO: Improve hevc stripping. It should always strip when there is a codec mismatch (both ways)
             const stripEnhanced = isEnhanced && streamInfo.ModifiedM3U8;
@@ -2047,6 +2073,21 @@
                 streamInfo.HasLoggedUnknownSignifiers = false;
                 streamInfo.LoggedFastAutoplayThisBreak = false;
                 streamInfo.LoggedFastAutoplayReprobeThisBreak = false;
+                // Reload cooldown: ReloadCooldownSeconds since the last player reload of any kind, tripled
+                // after 3+ end-of-break reloads in 5 minutes. These values were computed but never applied,
+                // so the setting did nothing. Inside the window the end-of-break reload becomes pause/play.
+                // Leaving a modified (codec-swapped) master is exempt: only a reload returns the player to
+                // the original variants. 0 disables the cooldown.
+                if (!streamInfo.ReloadTimestamps) streamInfo.ReloadTimestamps = [];
+                streamInfo.ReloadTimestamps = streamInfo.ReloadTimestamps.filter(t => Date.now() - t < 300000);
+                const recentReloads = streamInfo.ReloadTimestamps.length;
+                const effectiveCooldown = recentReloads >= 3 ? ReloadCooldownSeconds * 3 : ReloadCooldownSeconds;
+                const wasUsingModifiedM3U8 = streamInfo.IsUsingModifiedM3U8;
+                const tooSoonSinceLastReload = !wasUsingModifiedM3U8 && effectiveCooldown > 0 && !!streamInfo.LastPlayerReload && (Date.now() - streamInfo.LastPlayerReload) < (effectiveCooldown * 1000);
+                const skipReloadForCooldown = () => {
+                    console.log('[AD DEBUG] Skipping end-of-break reload — last reload was ' + ((Date.now() - streamInfo.LastPlayerReload) / 1000).toFixed(0) + 's ago (cooldown: ' + effectiveCooldown + 's' + (recentReloads >= 3 ? ', auto-escalated from ' + recentReloads + ' reloads in 5min' : '') + ') — pause/play instead');
+                    postStreamMessage(streamInfo, { key: 'PauseResumePlayer' });
+                };
                 // A no-strip break needs a reset only if backup playback changed the media source.
                 if (!hadStrippedSegments) {
                     if (!streamInfo.LastCommittedBackupPlayerType) {
@@ -2062,22 +2103,17 @@
                     // to flush the MediaSource buffer + refresh the access token.
                     // For autoplay (360p) specifically, the reload also restores Source
                     // quality (autoplay-scoped token only serves 360p variant ladder).
-                    if (streamInfo.LastCommittedBackupPlayerType) {
+                    if (streamInfo.LastCommittedBackupPlayerType && tooSoonSinceLastReload) {
+                        skipReloadForCooldown();
+                    } else if (streamInfo.LastCommittedBackupPlayerType) {
                         const isAutoplay = streamInfo.LastCommittedBackupPlayerType === 'autoplay';
                         const reason = isAutoplay ? 'autoplay (360p) — restoring Source quality' : streamInfo.LastCommittedBackupPlayerType + ' — flushing MediaSource to prevent A/V desync accumulation';
                         console.log('[AD DEBUG] End-of-break reload: ' + reason);
                         streamInfo.LastPlayerReload = Date.now();
-                        if (!streamInfo.ReloadTimestamps) streamInfo.ReloadTimestamps = [];
                         streamInfo.ReloadTimestamps.push(Date.now());
                         postStreamMessage(streamInfo, { key: 'ReloadPlayer', kind: 'early' });
                     }
                 } else {
-                    // Auto-escalate cooldown: if 3+ reloads in last 5 min, triple the cooldown
-                    if (!streamInfo.ReloadTimestamps) streamInfo.ReloadTimestamps = [];
-                    streamInfo.ReloadTimestamps = streamInfo.ReloadTimestamps.filter(t => Date.now() - t < 300000);
-                    const recentReloads = streamInfo.ReloadTimestamps.filter(t => Date.now() - t < 300000).length;
-                    const effectiveCooldown = recentReloads >= 3 ? ReloadCooldownSeconds * 3 : ReloadCooldownSeconds;
-                    const tooSoonSinceLastReload = streamInfo.LastPlayerReload && (Date.now() - streamInfo.LastPlayerReload) < (effectiveCooldown * 1000);
                     // Skip end-of-break reload when cycle rescue handled the break cleanly:
                     // a freeze of ≤2 polls (~4s) was resolved by switching to a clean backup,
                     // and no early reload was needed. The player is on a healthy backup stream
@@ -2089,11 +2125,7 @@
                     if (cycleRescuedCleanly) {
                         console.log('[AD DEBUG] Cycle rescue handled the break cleanly — skipping end-of-break reload');
                     }
-                    // Post-ad reload bypasses cooldown: it's a buffer flush tied to natural break
-                    // end, not a cascade-risk retry. The ad break cycle itself rate-limits this
-                    // path (once per break). Cooldown still gates buffer-monitor and other
-                    // cascade-risk paths that can fire repeatedly in-break.
-                    const shouldReload = streamInfo.IsUsingModifiedM3U8 || (ReloadPlayerAfterAd && !cycleRescuedCleanly);
+                    const shouldReload = wasUsingModifiedM3U8 || (ReloadPlayerAfterAd && !cycleRescuedCleanly && !tooSoonSinceLastReload);
                     if (shouldReload) {
                         streamInfo.ReloadTimestamps.push(Date.now());
                         streamInfo.IsUsingModifiedM3U8 = false;
@@ -2106,10 +2138,9 @@
                             key: 'ReloadPlayer',
                             kind: 'early'
                         });
+                    } else if (tooSoonSinceLastReload && ReloadPlayerAfterAd && !cycleRescuedCleanly) {
+                        skipReloadForCooldown();
                     } else {
-                        if (tooSoonSinceLastReload) {
-                            console.log('[AD DEBUG] Skipping reload — last reload was ' + ((Date.now() - streamInfo.LastPlayerReload) / 1000).toFixed(0) + 's ago (cooldown: ' + effectiveCooldown + 's' + (recentReloads >= 3 ? ', auto-escalated from ' + recentReloads + ' reloads in 5min' : '') + ')');
-                        }
                         postStreamMessage(streamInfo, {
                             key: 'PauseResumePlayer'
                         });
@@ -4187,7 +4218,7 @@
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.47');
+        initializeTASControls('vaft', '68.5.48');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
