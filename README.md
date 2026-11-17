@@ -101,7 +101,7 @@ localStorage.removeItem('twitchAdSolutions_hideAdOverlay');
 | `playerType` | `popout` | Player type for token requests: `popout`, `embed`, `site`, or `autoplay`. Autoplay can limit quality to 360p. |
 | `hideAdOverlay` | Unset | Set to `true` to hide the "Blocking ads" banner. |
 | `pinBackupPlayerType` | vaft: `true`; video-swap-new: `false` | Remember successful backups. Vaft also promotes Source-quality backups separately; this setting never pins `autoplay`. |
-| `reloadCooldownSeconds` | `30` | Seconds between reloads. Some recovery paths bypass this cooldown. Set to `0` to disable it. |
+| `reloadCooldownSeconds` | `30` | Minimum seconds between a player reload and the next end-of-break reload (pause/play is used instead inside the window; tripled after 3 such reloads in 5 minutes). Early reloads and stall/error recovery are not gated by it. Set to `0` to disable it. |
 | `disableReloadCap` | Unset; vaft only | Set to `true` to allow repeated buffer-monitor reloads. This can cause reload loops. |
 | `preferLowQualityBackup` | `true`; vaft only | Allow the 360p autoplay fallback, including recovery from stalled ad stripping. Set to `false` to disable both. |
 | `backupSwapFirst` | `true`; vaft only | Try backup streams first. Set to `false` to strip ad segments first. |
