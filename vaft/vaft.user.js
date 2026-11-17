@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      68.5.46
+// @version      68.5.47
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 131;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 132;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'userscript';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -2420,6 +2420,60 @@
             console.log('[AD DEBUG] Player error check failed: ' + err.message);
         }
     }
+    // Background freeze watchdog. A hidden tab can freeze (playhead stops, nothing recovers) because the buffer
+    // monitor polls 3x slower there and browser timers are clamped. A tiny Worker timer is not throttled like page
+    // timers, so it ticks every 2s; when the tab is hidden and the playhead of a live, unpaused player has not
+    // moved for N seconds, request one hard player reload (kind 'background-freeze', fresh token).
+    // Skipped: visible tab, PiP, ad breaks (ad stall logic owns those), user pause intent, an active recovery.
+    // Limits: 60s between reloads, three per 10 minutes. Setting: twitchAdSolutions_backgroundFreezeSeconds
+    // (default 15, 0 disables).
+    const backgroundFreezeState = { thresholdMs: 15000, video: null, lastTime: -1, frozenSince: 0, reloads: [] };
+    function checkBackgroundFreeze() {
+        try {
+            const w = backgroundFreezeState;
+            const reset = () => { w.frozenSince = 0; w.video = null; };
+            if (!document.hidden || document.pictureInPictureElement || playerBufferState.inAdBreak) { reset(); return; }
+            const current = getPlayerAndState();
+            const video = current?.player?.getHTMLVideoElement?.();
+            if (!video || video.ended || current.state?.props?.content?.type !== 'live'
+                || playerBufferState.userPauseIntent || current.player.isPaused()) { reset(); return; }
+            const now = Date.now();
+            if (video !== w.video || Math.abs(video.currentTime - w.lastTime) > 0.05) {
+                w.video = video;
+                w.lastTime = video.currentTime;
+                w.frozenSince = now;
+                return;
+            }
+            if (now - w.frozenSince < w.thresholdMs || doTwitchPlayerTask.recovery) return;
+            const reloads = w.reloads;
+            while (reloads.length > 0 && now - reloads[0] > 600000) reloads.shift();
+            if (reloads.length >= 3 || (reloads.length > 0 && now - reloads[reloads.length - 1] < 60000)) return;
+            reloads.push(now);
+            w.frozenSince = now;
+            console.log('[AD DEBUG] Hidden tab: playhead frozen for ' + Math.round(w.thresholdMs / 1000) + 's — replacing the player (' + reloads.length + '/3 in 10 minutes). Disable: twitchAdSolutions_backgroundFreezeSeconds=0');
+            doTwitchPlayerTask(false, true, 'background-freeze');
+        } catch (err) {
+            console.log('[AD DEBUG] Background freeze check failed: ' + err.message);
+        }
+    }
+    function startBackgroundFreezeWatchdog() {
+        try {
+            const seconds = parseFloat(localStorage.getItem('twitchAdSolutions_backgroundFreezeSeconds'));
+            if (Number.isFinite(seconds)) {
+                if (seconds <= 0) { console.log('[AD DEBUG] Background freeze watchdog disabled via localStorage'); return; }
+                backgroundFreezeState.thresholdMs = Math.max(5, seconds) * 1000;
+            }
+        } catch {}
+        try {
+            const url = URL.createObjectURL(new Blob(['setInterval(function(){postMessage(0)},2000)'], { type: 'text/javascript' }));
+            const ticker = new Worker(url);
+            URL.revokeObjectURL(url);
+            ticker.onmessage = checkBackgroundFreeze;
+            ticker.onerror = () => { try { ticker.terminate(); } catch {} setInterval(checkBackgroundFreeze, 2000); };
+        } catch {
+            setInterval(checkBackgroundFreeze, 2000);
+        }
+    }
     // Poll the player state to detect and fix buffering caused by ad stream switching
     function monitorPlayerBuffering() {
         clearTimeout(monitorPlayerBuffering.timeoutId);
@@ -3235,7 +3289,7 @@
         // Paused decoder internals can be the failure requiring a reset, not a user action.
         // 'error-recovery' replaces a player that stopped with Twitch's error overlay, which counts as paused.
         const requiredReset = isReload && !document.pictureInPictureElement
-            && ((reloadKind === 'early' && !playerPaused) || reloadKind === 'error-recovery');
+            && (((reloadKind === 'early' || reloadKind === 'background-freeze') && !playerPaused) || reloadKind === 'error-recovery');
         if (wasPaused && !requiredReset) {
             if (playerBufferState.weJustPaused && (Date.now() - playerBufferState.weJustPaused) < 10000) {
                 try { player.play()?.catch?.(() => {}); } catch {}
@@ -3262,7 +3316,7 @@
             return;
         }
         // Playback and live latency cannot prove mixed-source tracks are synchronized.
-        if (isReload && reloadKind !== 'early' && reloadKind !== 'error-recovery') {
+        if (isReload && reloadKind !== 'early' && reloadKind !== 'error-recovery' && reloadKind !== 'background-freeze') {
             const video = player.getHTMLVideoElement?.();
             if (video && video.readyState >= 3 && !video.paused && !video.ended) {
                 let latencySec = 0;
@@ -3312,7 +3366,7 @@
             let deadline = 0, observedVideo = null, initialTime = 0, playedVideo = null;
             let settingsAfterReload, preMutedVideo = null;
             // 'error-recovery' needs a new media player instance and a fresh token like a required 'early' reset.
-            const replacePlayer = reloadKind === 'early' || reloadKind === 'error-recovery';
+            const replacePlayer = reloadKind === 'early' || reloadKind === 'error-recovery' || reloadKind === 'background-freeze';
             let hardReload = replacePlayer && !iosSoftReload;
             let refreshToken = replacePlayer;
             request.upgrade = () => {
@@ -3712,7 +3766,7 @@
         if (data.quality !== undefined) entry.quality = /^\d{1,5}x\d{1,5}$/.test(data.quality) ? data.quality : 'unknown';
         if (Number.isFinite(data.durationMs)) entry.durationMs = Math.min(60000, Math.max(0, data.durationMs));
         if (data.event === 'reload-request') {
-            entry.reason = ['early', 'worker-error', 'error-recovery', 'normal'].includes(data.reason) ? data.reason : 'normal';
+            entry.reason = ['early', 'worker-error', 'error-recovery', 'background-freeze', 'normal'].includes(data.reason) ? data.reason : 'normal';
             state.current.recovery = entry.reason;
         }
         if (data.event === 'backup-selected') {
@@ -3799,7 +3853,8 @@
             ['disablePostBreakWedge', 'Disable post-break video recovery', false, 'boolean'],
             ['disableReloadCap', 'Allow unlimited recovery reloads', false, 'boolean'],
             ['iosSoftReload', 'Preserve the player on Apple touch devices', true, 'boolean'],
-            ['errorRecovery', 'Replace the player after a Twitch error screen', true, 'boolean', 'If Twitch shows an error (#1000-#4000) right after a vaft reload or during an ad break, replace the player once. At most 2 per 10 minutes.']
+            ['errorRecovery', 'Replace the player after a Twitch error screen', true, 'boolean', 'If Twitch shows an error (#1000-#4000) right after a vaft reload or during an ad break, replace the player once. At most 2 per 10 minutes.'],
+            ['backgroundFreezeSeconds', 'Replace a frozen background tab player after (seconds)', 15, [0, 300, 1], 'If the tab is hidden and the playhead stops for this long, replace the player. 0 disables. At most 3 per 10 minutes.']
         );
         let advanced;
         const fields = definitions.map(([key, title, fallback, type, hint], index) => {
@@ -4132,7 +4187,7 @@
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.46');
+        initializeTASControls('vaft', '68.5.47');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
@@ -4340,6 +4395,7 @@
     }, 'send');
     if (PlayerBufferingFix) {
         monitorPlayerBuffering();
+        startBackgroundFreezeWatchdog();
     }
     if (document.readyState === "complete" || document.readyState === "interactive") {
         onContentLoaded();
