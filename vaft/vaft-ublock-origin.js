@@ -2012,39 +2012,39 @@ twitch-videoad.js text/javascript
                 // Reload cooldown: ReloadCooldownSeconds since the last player reload of any kind, tripled
                 // after 3+ end-of-break reloads in 5 minutes. These values were computed but never applied,
                 // so the setting did nothing. Inside the window the end-of-break reload becomes pause/play.
-                // Leaving a modified (codec-swapped) master is exempt: only a reload returns the player to
-                // the original variants. 0 disables the cooldown.
+                // Restoring the original variants after a codec swap or autoplay backup requires
+                // a reload with a fresh token. 0 disables the cooldown for other reloads.
                 if (!streamInfo.ReloadTimestamps) streamInfo.ReloadTimestamps = [];
                 streamInfo.ReloadTimestamps = streamInfo.ReloadTimestamps.filter(t => Date.now() - t < 300000);
                 const recentReloads = streamInfo.ReloadTimestamps.length;
                 const effectiveCooldown = recentReloads >= 3 ? ReloadCooldownSeconds * 3 : ReloadCooldownSeconds;
-                const wasUsingModifiedM3U8 = streamInfo.IsUsingModifiedM3U8;
-                const tooSoonSinceLastReload = !wasUsingModifiedM3U8 && effectiveCooldown > 0 && !!streamInfo.LastPlayerReload && (Date.now() - streamInfo.LastPlayerReload) < (effectiveCooldown * 1000);
+                const restoreOriginalStream = streamInfo.IsUsingModifiedM3U8 || streamInfo.LastCommittedBackupPlayerType === 'autoplay';
+                const tooSoonSinceLastReload = effectiveCooldown > 0 && !!streamInfo.LastPlayerReload && (Date.now() - streamInfo.LastPlayerReload) < (effectiveCooldown * 1000);
                 const skipReloadForCooldown = () => {
                     console.log('[AD DEBUG] Skipping end-of-break reload — last reload was ' + ((Date.now() - streamInfo.LastPlayerReload) / 1000).toFixed(0) + 's ago (cooldown: ' + effectiveCooldown + 's' + (recentReloads >= 3 ? ', auto-escalated from ' + recentReloads + ' reloads in 5min' : '') + ') — pause/play instead');
                     postStreamMessage(streamInfo, { key: 'PauseResumePlayer' });
                 };
-                // A no-strip break needs a reset only if backup playback changed the media source.
-                if (!hadStrippedSegments) {
+                if (restoreOriginalStream) {
+                    console.log('[AD DEBUG] End-of-break reload: restoring original stream variants');
+                    streamInfo.IsUsingModifiedM3U8 = false;
+                    streamInfo.LastPlayerReload = Date.now();
+                    streamInfo.ReloadTimestamps.push(streamInfo.LastPlayerReload);
+                    postStreamMessage(streamInfo, { key: 'ReloadPlayer', kind: 'early' });
+                } else if (!hadStrippedSegments) {
                     if (!streamInfo.LastCommittedBackupPlayerType) {
                         console.log('[AD DEBUG] CSAI-only ad break (stripped 0) — clearing backup without player action');
                     }
-                    streamInfo.IsUsingModifiedM3U8 = false;
-                    // Exception: if ANY backup was committed during this break (escape hatch
+                    // If a backup was committed during this break (escape hatch
                     // or cycle rescue that didn't meet cycleRescuedCleanly criteria), the
                     // MediaSource buffer has accumulated mixed-source segments (backup-fetched
                     // via alternate player-type access token + native-fetched). Mixing can
                     // cause audio/video track timestamps to diverge, and without a reload the
                     // drift compounds across subsequent escape-hatch breaks. Force a hard reload
                     // to flush the MediaSource buffer + refresh the access token.
-                    // For autoplay (360p) specifically, the reload also restores Source
-                    // quality (autoplay-scoped token only serves 360p variant ladder).
                     if (streamInfo.LastCommittedBackupPlayerType && tooSoonSinceLastReload) {
                         skipReloadForCooldown();
                     } else if (streamInfo.LastCommittedBackupPlayerType) {
-                        const isAutoplay = streamInfo.LastCommittedBackupPlayerType === 'autoplay';
-                        const reason = isAutoplay ? 'autoplay (360p) — restoring Source quality' : streamInfo.LastCommittedBackupPlayerType + ' — flushing MediaSource to prevent A/V desync accumulation';
-                        console.log('[AD DEBUG] End-of-break reload: ' + reason);
+                        console.log('[AD DEBUG] End-of-break reload: ' + streamInfo.LastCommittedBackupPlayerType + ' — flushing MediaSource to prevent A/V desync accumulation');
                         streamInfo.LastPlayerReload = Date.now();
                         streamInfo.ReloadTimestamps.push(Date.now());
                         postStreamMessage(streamInfo, { key: 'ReloadPlayer', kind: 'early' });
@@ -2061,10 +2061,8 @@ twitch-videoad.js text/javascript
                     if (cycleRescuedCleanly) {
                         console.log('[AD DEBUG] Cycle rescue handled the break cleanly — skipping end-of-break reload');
                     }
-                    const shouldReload = wasUsingModifiedM3U8 || (ReloadPlayerAfterAd && !cycleRescuedCleanly && !tooSoonSinceLastReload);
-                    if (shouldReload) {
+                    if (ReloadPlayerAfterAd && !cycleRescuedCleanly && !tooSoonSinceLastReload) {
                         streamInfo.ReloadTimestamps.push(Date.now());
-                        streamInfo.IsUsingModifiedM3U8 = false;
                         streamInfo.LastPlayerReload = Date.now();
                         // Hard reload when buffer may be dirty from strip or m3u8 modification —
                         // soft reload preserves the existing MediaSource buffer, and any

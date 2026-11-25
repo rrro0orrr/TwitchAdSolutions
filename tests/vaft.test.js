@@ -1345,6 +1345,9 @@ for (const file of files) {
             ['cooldown elapsed', { NumStrippedAdSegments: 4, LastPlayerReload: now - 31000 }, 30, 'ReloadPlayer'],
             ['cooldown disabled', { NumStrippedAdSegments: 4, LastPlayerReload: now - 10000 }, 0, 'ReloadPlayer'],
             ['no earlier reload', { LastCommittedBackupPlayerType: 'autoplay' }, 30, 'ReloadPlayer'],
+            ['leaving a modified master without stripping or a backup', { LastPlayerReload: now - 10000, IsUsingModifiedM3U8: true }, 30, 'ReloadPlayer'],
+            ['autoplay backup during cooldown', { LastPlayerReload: now - 10000, LastCommittedBackupPlayerType: 'autoplay' }, 30, 'ReloadPlayer'],
+            ['autoplay backup during cooldown after stripping', { NumStrippedAdSegments: 4, LastPlayerReload: now - 10000, LastCommittedBackupPlayerType: 'autoplay' }, 30, 'ReloadPlayer'],
             ['leaving a modified master', { NumStrippedAdSegments: 4, LastPlayerReload: now - 10000, IsUsingModifiedM3U8: true }, 30, 'ReloadPlayer'],
             ['escalated to 90s, reload 60s ago', { NumStrippedAdSegments: 4, LastPlayerReload: now - 60000, ReloadTimestamps: escalated.slice() }, 30, 'PauseResumePlayer'],
             ['escalated to 90s, reload 91s ago', { NumStrippedAdSegments: 4, LastPlayerReload: now - 91000, ReloadTimestamps: escalated.slice() }, 30, 'ReloadPlayer']

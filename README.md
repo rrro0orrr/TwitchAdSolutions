@@ -1,9 +1,9 @@
 <h1 align="center">TwitchAdSolutions</h1>
 
 <p align="center">
-  <a href="https://github.com/xBandaku/TwitchAdSolutions/releases"><img src="https://img.shields.io/github/v/release/xBandaku/TwitchAdSolutions?display_name=tag&label=version" alt="Latest version"></a>
-  <a href="https://github.com/xBandaku/TwitchAdSolutions/stargazers"><img src="https://img.shields.io/github/stars/xBandaku/TwitchAdSolutions?style=flat" alt="GitHub stars"></a>
-  <a href="https://github.com/xBandaku/TwitchAdSolutions/releases"><img src="https://img.shields.io/github/downloads/xBandaku/TwitchAdSolutions/total?label=downloads" alt="Total downloads"></a>
+  <a href="https://github.com/rrro0orrr/TwitchAdSolutions/releases"><img src="https://img.shields.io/github/v/release/rrro0orrr/TwitchAdSolutions?display_name=tag&label=version" alt="Latest version"></a>
+  <a href="https://github.com/rrro0orrr/TwitchAdSolutions/stargazers"><img src="https://img.shields.io/github/stars/rrro0orrr/TwitchAdSolutions?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/rrro0orrr/TwitchAdSolutions/releases"><img src="https://img.shields.io/github/downloads/rrro0orrr/TwitchAdSolutions/total?label=downloads" alt="Total downloads"></a>
 </p>
 
 <p align="center">
@@ -101,7 +101,7 @@ localStorage.removeItem('twitchAdSolutions_hideAdOverlay');
 | `playerType` | `popout` | Player type for token requests: `popout`, `embed`, `site`, or `autoplay`. Autoplay can limit quality to 360p. |
 | `hideAdOverlay` | Unset | Set to `true` to hide the "Blocking ads" banner. |
 | `pinBackupPlayerType` | vaft: `true`; video-swap-new: `false` | Remember successful backups. Vaft also promotes Source-quality backups separately; this setting never pins `autoplay`. |
-| `reloadCooldownSeconds` | `30` | Minimum seconds between a player reload and the next end-of-break reload (pause/play is used instead inside the window; tripled after 3 such reloads in 5 minutes). Early reloads and stall/error recovery are not gated by it. Set to `0` to disable it. |
+| `reloadCooldownSeconds` | `30` | Minimum seconds between a player reload and the next end-of-break reload (pause/play is used instead inside the window; tripled after 3 such reloads in 5 minutes). Early reloads and stall/error recovery bypass it. In vaft, so does restoring the original stream after a codec swap or autoplay backup. Set to `0` to disable it. |
 | `disableReloadCap` | Unset; vaft only | Set to `true` to allow repeated buffer-monitor reloads. This can cause reload loops. |
 | `preferLowQualityBackup` | `true`; vaft only | Allow the 360p autoplay fallback, including recovery from stalled ad stripping. Set to `false` to disable both. |
 | `backupSwapFirst` | `true`; vaft only | Try backup streams first. Set to `false` to strip ad segments first. |
@@ -113,7 +113,7 @@ During an autoplay backup, Twitch's quality menu can still show Source while pla
 
 Check that the script is enabled and has the required browser permissions, then reload Twitch. Disable other Twitch-specific ad blockers. If playback problems continue, disable other Twitch player extensions too.
 
-See the [troubleshooting guide](issues.md) for freezing, buffering, and missing injection. To [report a bug](https://github.com/xBandaku/TwitchAdSolutions/issues/new), include your browser, script version, Twitch extensions, and relevant `[AD DEBUG]` console messages.
+See the [troubleshooting guide](issues.md) for freezing, buffering, and missing injection. To [report a bug](https://github.com/rrro0orrr/TwitchAdSolutions/issues/new), include your browser, script version, Twitch extensions, and relevant `[AD DEBUG]` console messages.
 
 For other options, see the [solution list](full-list.md).
 
@@ -168,4 +168,4 @@ This command requires the selected tests to fail before the fix with the expecte
 
 Fork of [ryanbr/TwitchAdSolutions](https://github.com/ryanbr/TwitchAdSolutions), originally based on [pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions).
 
-[MIT](LICENSE). See [releases](https://github.com/xBandaku/TwitchAdSolutions/releases) for versioned downloads and [CHANGELOG.md](CHANGELOG.md) for release history.
+[MIT](LICENSE). See [releases](https://github.com/rrro0orrr/TwitchAdSolutions/releases) for versioned downloads and [CHANGELOG.md](CHANGELOG.md) for release history.
