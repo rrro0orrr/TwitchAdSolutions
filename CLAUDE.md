@@ -1,6 +1,6 @@
 # TwitchAdSolutions
 
-Fork of ryanbr/TwitchAdSolutions, originally based on pixeltris/TwitchAdSolutions (archived). Remote `origin` = xBandaku, remote `upstream` = ryanbr.
+Fork of ryanbr/TwitchAdSolutions, originally based on pixeltris/TwitchAdSolutions (archived). Remote `origin` = rrro0orrr/TwitchAdSolutions. Add `upstream` (ryanbr) manually if needed.
 
 ## Worker Blob Serialization (CRITICAL)
 
@@ -13,7 +13,7 @@ Functions serialized via `.toString()` into the Web Worker blob CANNOT reference
 ## Files
 
 Synced pairs (same logic, different format):
-- `vaft/vaft.user.js` + `vaft/vaft-ublock-origin.js`
+- `vaft/vaft.user.js` + `vaft/vaft-violentmonkey.user.js` + `vaft/vaft-ublock-origin.js` (Violentmonkey copy differs only in `TAS_INSTALL_METHOD`)
 - `video-swap-new/video-swap-new.user.js` + `video-swap-new/video-swap-new-ublock-origin.js`
 - `strip/strip.user.js` (standalone)
 
@@ -30,7 +30,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.48/133, video-swap-new 1.94/62, strip 1.12/29.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.5.49/134, video-swap-new 1.94/62, strip 1.12/29.
 
 ## localStorage Config
 
@@ -64,7 +64,7 @@ All read at init, injected into worker blob:
 ## Key Architecture (vaft)
 
 - **Buffer monitor** (`monitorPlayerBuffering`) — polls player state every 1-3s (visibility-aware). Detects stalls, fires pause/play or reload.
-- **Reload cooldown** — 30s default, auto-escalates to 90s if 3+ end-of-break reloads in 5 minutes. Applied in the worker to the end-of-break reload (both the stripped and the committed-backup branch): inside the window it becomes pause/play. Exempt: leaving a modified (codec-swapped) master. Early reloads, the main-thread watchdogs and error recovery have their own limits and are not gated by it.
+- **Reload cooldown** — 30s default, auto-escalates to 90s if 3+ end-of-break reloads in 5 minutes. Applied in the worker to the end-of-break reload (both the stripped and the committed-backup branch): inside the window it becomes pause/play. Exempt: leaving a modified (codec-swapped) master or a committed `autoplay` backup — both always hard-reload (`early`) to restore the original variants, even without stripped segments. Early reloads, the main-thread watchdogs and error recovery have their own limits and are not gated by it.
 - **Worker crash reloads** — `allowWorkerCrashReload()`: at most two per five minutes across workers.
 - **Minimal requests** — for 1.5s after a player reload the backup search takes the first type that returns a playlist: the type already committed this break, else the head of the normal order (pinned / fast-autoplay first).
 - **Reload cap** — buffer monitor reloads at most once per recovery window (`recoveryReloadUsed`).
