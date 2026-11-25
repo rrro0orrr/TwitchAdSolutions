@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft - Violentmonkey test)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      68.5.48
+// @version      68.5.49
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -48,7 +48,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 133;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 134;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'Violentmonkey';
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -352,6 +352,9 @@
     // Replace window.Worker to intercept Twitch's video worker and inject ad-blocking logic
     let injectedBlobUrl = null;
     let originalRevokeObjectURL = null;
+    // Unhooked Worker constructor for vaft's own helper workers (background-freeze ticker). Its blob URL has the
+    // twitch.tv origin, so the hooked constructor would wrap it as a Twitch video worker.
+    let unhookedWorker = null;
     function hookWindowWorker() {
         // Prevent Twitch from revoking our injected worker blob URL
         if (!URL.revokeObjectURL.__tasMasked) {
@@ -364,6 +367,7 @@
         }
         const reinsert = getWorkersForReinsert(window.Worker);
         const cleanWorker = getCleanWorker(window.Worker) || window.Worker;
+        if (!unhookedWorker) unhookedWorker = cleanWorker;
         const newWorker = class Worker extends cleanWorker {
             constructor(twitchBlobUrl, options) {
                 let isTwitchWorker = false;
@@ -2495,7 +2499,7 @@
         } catch {}
         try {
             const url = URL.createObjectURL(new Blob(['setInterval(function(){postMessage(0)},2000)'], { type: 'text/javascript' }));
-            const ticker = new Worker(url);
+            const ticker = new (unhookedWorker || window.Worker)(url);
             URL.revokeObjectURL(url);
             ticker.onmessage = checkBackgroundFreeze;
             ticker.onerror = () => { try { ticker.terminate(); } catch {} setInterval(checkBackgroundFreeze, 2000); };
@@ -4216,7 +4220,7 @@
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('vaft', '68.5.48');
+        initializeTASControls('vaft', '68.5.49');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
