@@ -231,6 +231,16 @@ twitch-videoad.js text/javascript
     // progress. The no-break tally is the point: an ad served while the m3u8 carried no markers
     // is one vaft never sees — nothing stripped, no backup searched, nothing else in the log.
     // The previous once-per-session latch could not surface that at all.
+    // Main-thread CSAI request classifier for counting/logging. Compares the parsed hostname
+    // instead of a URL substring, so query strings or look-alike hosts cannot match.
+    function isCsaiAdServerUrl(url) {
+        try {
+            const host = new URL(String(url), 'https://www.twitch.tv/').hostname;
+            return host === 'edge.ads.twitch.tv' || host === 'amazon-adsystem.com' || host.endsWith('.amazon-adsystem.com');
+        } catch {
+            return false;
+        }
+    }
     const csaiRequestCounts = Object.create(null);
     function countCsaiRequest(csaiType, transport, blocked) {
         const inBreak = playerBufferState.inAdBreak === true;
@@ -3650,7 +3660,7 @@ twitch-videoad.js text/javascript
                         }
                     }
                 }
-                if (requestUrl.includes('edge.ads.twitch.tv') || requestUrl.includes('amazon-adsystem.com')) {
+                if (isCsaiAdServerUrl(requestUrl)) {
                     const csaiType = requestUrl.includes('bp=midroll') ? 'midroll' : requestUrl.includes('bp=preroll') ? 'preroll' : 'unknown';
                     const blockCsai = BlockClientSideAds && isClientSideAdRequestUrl(requestUrl);
                     countCsaiRequest(csaiType, 'fetch', blockCsai);
@@ -4334,7 +4344,7 @@ twitch-videoad.js text/javascript
     XMLHttpRequest.prototype.open = maskAsNative(function(method, url) {
         blockedCsaiXhrs.delete(this);
         const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.href : '';
-        if (urlStr.includes('edge.ads.twitch.tv') || urlStr.includes('amazon-adsystem.com')) {
+        if (isCsaiAdServerUrl(urlStr)) {
             const csaiType = urlStr.includes('bp=midroll') ? 'midroll' : urlStr.includes('bp=preroll') ? 'preroll' : 'unknown';
             const blockCsai = BlockClientSideAds && isClientSideAdRequestUrl(urlStr);
             countCsaiRequest(csaiType, 'xhr', blockCsai);

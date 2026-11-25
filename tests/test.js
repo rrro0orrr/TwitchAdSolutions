@@ -196,7 +196,7 @@ let result = stripAdSegments(adM3u8, false, streamInfo);
 assertEq(streamInfo.NumStrippedAdSegments, 1, 'counts stripped ad segment');
 assert(streamInfo.IsStrippingAdSegments === true, 'marks as stripping');
 assert(helperContext.AdSegmentCache.has('https://ad-segment-1.ts'), 'caches ad segment URL');
-assert(!result.includes('https://prefetch.url'), 'removes prefetch URLs during ads');
+assert(!/^#EXT-X-TWITCH-PREFETCH:/m.test(result), 'removes prefetch URLs during ads');
 assert(streamInfo.RecoverySegments.length === 1, 'caches live segment for recovery');
 
 // Test: no stripping on clean m3u8
@@ -286,8 +286,8 @@ streamInfo = {
     ]
 };
 result = stripAdSegments(allAdM3u8, false, streamInfo);
-assert(result.includes('https://recovery-1.ts'), 'restores recovery segment 1');
-assert(result.includes('https://recovery-2.ts'), 'restores recovery segment 2');
+assert(result.split('\n').includes('https://recovery-1.ts'), 'restores recovery segment 1');
+assert(result.split('\n').includes('https://recovery-2.ts'), 'restores recovery segment 2');
 
 // Test: MEDIA-SEQUENCE is rewritten on recovery injection
 helperContext.AdSegmentCache = new Map();
