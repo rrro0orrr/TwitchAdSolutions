@@ -10,7 +10,10 @@ if (!ref || !pattern || !expectedError) {
 }
 const commit = execFileSync('git', ['rev-parse', '--verify', ref + '^{commit}'], { cwd: root, encoding: 'utf8' }).trim();
 const files = fs.readdirSync(__dirname).filter(file => file.endsWith('.test.js')).map(file => path.join(__dirname, file));
-const matches = new RegExp(pattern);
+// Node applies the name pattern itself; files with no matching test still report as a
+// top-level subtest named after the file, so drop those instead of re-matching the pattern.
+const fileNames = new Set(files);
+const isTestFile = name => fileNames.has(path.resolve(root, name));
 const run = baseline => {
     const env = { ...process.env };
     delete env.TWITCH_TEST_SCRIPT_REF;
@@ -19,7 +22,7 @@ const run = baseline => {
         cwd: root, env, encoding: 'utf8', timeout: 60000
     });
     if (result.error) throw result.error;
-    const selected = Array.from(result.stdout.matchAll(/^# Subtest: (.+)$/gm), match => match[1]).filter(name => matches.test(name));
+    const selected = Array.from(result.stdout.matchAll(/^# Subtest: (.+)$/gm), match => match[1]).filter(name => !isTestFile(name));
     assert.ok(selected.length > 0, 'No matching regression tests ran');
     const summary = key => Number(new RegExp('^# ' + key + ' (\\d+)$', 'm').exec(result.stdout)?.[1]);
     if (baseline) {
