@@ -352,6 +352,9 @@
     // Replace window.Worker to intercept Twitch's video worker and inject ad-blocking logic
     let injectedBlobUrl = null;
     let originalRevokeObjectURL = null;
+    // Unhooked Worker constructor for vaft's own helper workers (background-freeze ticker). Its blob URL has the
+    // twitch.tv origin, so the hooked constructor would wrap it as a Twitch video worker.
+    let unhookedWorker = null;
     function hookWindowWorker() {
         // Prevent Twitch from revoking our injected worker blob URL
         if (!URL.revokeObjectURL.__tasMasked) {
@@ -364,6 +367,7 @@
         }
         const reinsert = getWorkersForReinsert(window.Worker);
         const cleanWorker = getCleanWorker(window.Worker) || window.Worker;
+        if (!unhookedWorker) unhookedWorker = cleanWorker;
         const newWorker = class Worker extends cleanWorker {
             constructor(twitchBlobUrl, options) {
                 let isTwitchWorker = false;
@@ -2495,7 +2499,7 @@
         } catch {}
         try {
             const url = URL.createObjectURL(new Blob(['setInterval(function(){postMessage(0)},2000)'], { type: 'text/javascript' }));
-            const ticker = new Worker(url);
+            const ticker = new (unhookedWorker || window.Worker)(url);
             URL.revokeObjectURL(url);
             ticker.onmessage = checkBackgroundFreeze;
             ticker.onerror = () => { try { ticker.terminate(); } catch {} setInterval(checkBackgroundFreeze, 2000); };
