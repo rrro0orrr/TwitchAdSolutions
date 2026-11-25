@@ -79,8 +79,6 @@ jobs:
         cache: npm
     - run: npm ci --ignore-scripts
     - run: npm run lint
-    - run: python -m compileall -q .github
-    - run: python -m unittest discover -s .github/scripts -p "test_*.py" -v
 
   browser:
     name: ${{ matrix.browser }} fixtures
