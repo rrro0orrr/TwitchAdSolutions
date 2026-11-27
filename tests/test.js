@@ -286,8 +286,8 @@ streamInfo = {
     ]
 };
 result = stripAdSegments(allAdM3u8, false, streamInfo);
-assert(result.split('\n').includes('https://recovery-1.ts'), 'restores recovery segment 1');
-assert(result.split('\n').includes('https://recovery-2.ts'), 'restores recovery segment 2');
+assert(result.split('\n').some(line => line === 'https://recovery-1.ts'), 'restores recovery segment 1');
+assert(result.split('\n').some(line => line === 'https://recovery-2.ts'), 'restores recovery segment 2');
 
 // Test: MEDIA-SEQUENCE is rewritten on recovery injection
 helperContext.AdSegmentCache = new Map();
