@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (video-swap-new)
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      1.94
+// @version      1.95
 // @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/video-swap-new/video-swap-new.user.js
 // @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/video-swap-new/video-swap-new.user.js
 // @description  Multiple solutions for blocking Twitch ads (video-swap-new)
@@ -47,7 +47,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 62;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 63;// Used to prevent conflicts with outdated versions of the scripts
     const TAS_INSTALL_METHOD = 'userscript';
     console.log('[AD DEBUG] TwitchAdSolutions video-swap-new v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
@@ -153,6 +153,15 @@
         }
     }
     const loggedCsaiTypes = new Set();
+    // CSAI request classifier for logging. Compares the parsed hostname instead of a URL
+    // substring, so query strings or look-alike hosts cannot match.
+    function isCsaiAdServerUrl(url) {
+        try {
+            return new URL(String(url), 'https://www.twitch.tv/').hostname === 'edge.ads.twitch.tv';
+        } catch {
+            return false;
+        }
+    }
     let twitchPlayerAndState = null;
     let localStorageHookFailed = false;
     let lastReloadTimestamp = 0;
@@ -1304,7 +1313,7 @@
                         }
                     }
                 }
-                if (requestUrl.includes('edge.ads.twitch.tv')) {
+                if (isCsaiAdServerUrl(requestUrl)) {
                     const csaiType = requestUrl.includes('bp=midroll') ? 'midroll' : requestUrl.includes('bp=preroll') ? 'preroll' : 'unknown';
                     if (!loggedCsaiTypes.has(csaiType)) {
                         loggedCsaiTypes.add(csaiType);
@@ -1999,7 +2008,7 @@
         window.twitchAdSolutionsTools = { openSettings: show, diagnostics: getTASDiagnostics };
     }
     function onContentLoaded() {
-        initializeTASControls('video-swap-new', '1.94');
+        initializeTASControls('video-swap-new', '1.95');
         if (document.getElementById('seventv-extension')) {
             console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
         }
@@ -2099,7 +2108,7 @@
     hookFetch();
     const realXHROpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = maskAsNative(function(method, url) {
-        if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
+        if (typeof url === 'string' && isCsaiAdServerUrl(url)) {
             const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
             const xhrKey = csaiType + '-xhr';
             if (!loggedCsaiTypes.has(xhrKey)) {
