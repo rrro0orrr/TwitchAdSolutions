@@ -35,7 +35,7 @@ for (const file of mainFiles.filter(file => file.startsWith('vaft'))) {
         } });
         context.hookWorkerFetch();
         const result = await (await context.fetch('https://usher.ttvnw.net/api/v2/channel/hls/fixture.m3u8')).text();
-        assert.ok(result.includes('https://cdn.invalid/redirected/video/index.m3u8'), 'wrong redirected video base');
+        assert.ok(result.split('\n').some(line => line === 'https://cdn.invalid/redirected/video/index.m3u8'), 'wrong redirected video base');
         assert.ok(result.includes('URI="https://cdn.invalid/redirected/audio/index.m3u8"'), 'unresolved audio group');
     });
 
