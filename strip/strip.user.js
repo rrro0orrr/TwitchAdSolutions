@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (strip) - BAD, DON'T USE THIS
 // @namespace    https://github.com/ryanbr/TwitchAdSolutions
-// @version      1.12
+// @version      1.13
 // @description  Multiple solutions for blocking Twitch ads (strip)
 // @updateURL    https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/strip/strip.user.js
 // @downloadURL  https://github.com/rrro0orrr/TwitchAdSolutions/raw/master/strip/strip.user.js
@@ -13,7 +13,7 @@
 // ==/UserScript==
 (function() {
     'use strict';
-    const ourTwitchAdSolutionsVersion = 29;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 30;// Used to prevent conflicts with outdated versions of the scripts
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log("skipping strip as there's another script active. ourVersion:" + ourTwitchAdSolutionsVersion + " activeVersion:" + window.twitchAdSolutionsVersion);
         window.twitchAdSolutionsVersion = ourTwitchAdSolutionsVersion;
@@ -34,6 +34,15 @@
         scope.V2API = false;
     }
     const loggedCsaiTypes = new Set();
+    // CSAI request classifier for logging. Compares the parsed hostname instead of a URL
+    // substring, so query strings or look-alike hosts cannot match.
+    function isCsaiAdServerUrl(url) {
+        try {
+            return new URL(String(url), 'https://www.twitch.tv/').hostname === 'edge.ads.twitch.tv';
+        } catch {
+            return false;
+        }
+    }
     let localStorageHookFailed = false;
     let adBlockDiv = null;
     const twitchWorkers = [];
@@ -403,7 +412,7 @@
                         }
                     }
                 }
-                if (url.includes('edge.ads.twitch.tv')) {
+                if (isCsaiAdServerUrl(url)) {
                     const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
                     if (!loggedCsaiTypes.has(csaiType)) {
                         loggedCsaiTypes.add(csaiType);
@@ -575,7 +584,7 @@
     hookFetch();
     const realXHROpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url) {
-        if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
+        if (typeof url === 'string' && isCsaiAdServerUrl(url)) {
             const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
             const xhrKey = csaiType + '-xhr';
             if (!loggedCsaiTypes.has(xhrKey)) {
