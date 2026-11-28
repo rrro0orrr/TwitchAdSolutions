@@ -351,6 +351,7 @@ twitch-videoad.js text/javascript
                 twitchWorkers.length = 0;
                 twitchWorkers.push(this);
                 this.addEventListener('message', (e) => {
+                    if (!twitchWorkers.includes(this)) return;
                     if (e.data.key === 'TASDiagnostic') recordTASDiagnostic(e.data);
                     if (e.data.key == 'UboUpdateAdBanner') {
                         updateAdblockBanner(e.data);
@@ -361,9 +362,11 @@ twitch-videoad.js text/javascript
                     }
                 });
                 this.addEventListener('message', async event => {
+                    if (!twitchWorkers.includes(this)) return;
                     if (event.data.key == 'FetchRequest') {
                         const fetchRequest = event.data.value;
                         const responseData = await handleWorkerFetchRequest(fetchRequest);
+                        if (!twitchWorkers.includes(this)) return;
                         this.postMessage({
                             key: 'FetchResponse',
                             value: responseData
@@ -377,7 +380,7 @@ twitch-videoad.js text/javascript
                 // player instance, and existing reload cooldown prevents restart loops.
                 let crashed = false;
                 this.addEventListener('error', (e) => {
-                    if (crashed) return;
+                    if (crashed || !twitchWorkers.includes(this)) return;
                     crashed = true;
                     console.log('[AD DEBUG] IVS WASM worker crashed: ' + ((e && e.message) || 'unknown error') + ' — triggering player reload to recover');
                     try { reloadTwitchPlayer(false); } catch (err) {
@@ -548,7 +551,9 @@ twitch-videoad.js text/javascript
                                         for (let j = 0; j < normalLines.length - 1; j++) {
                                             if (normalLines[j].startsWith('#EXT-X-STREAM-INF')) {
                                                 const resSettings = parseAttributes(normalLines[j].substring(normalLines[j].indexOf(':') + 1));
-                                                const lowResUrl = getStreamUrlForResolution(encodingsM3u8, streamInfo.Urls.get(normalLines[j + 1].trimEnd()));
+                                                const variant = streamInfo.Urls.get(normalLines[j + 1].trimEnd());
+                                                if (!variant) continue;
+                                                const lowResUrl = getStreamUrlForResolution(encodingsM3u8, variant);
                                                 const lowResInf = encodingsM3u8.match(new RegExp(`^.*(?=\n.*${lowResUrl})`, 'm'))?.[0];
                                                 if (!lowResInf) continue;
                                                 const lowResSettings = parseAttributes(lowResInf.substring(lowResInf.indexOf(':') + 1));
